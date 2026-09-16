@@ -1,0 +1,7 @@
+pip install -r requirement.txt
+
+uvicorn app.main:app --reload --port 8000
+
+curl -X POST http://localhost:8000/plan \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "Tác động của AI đến năng suất sinh viên đại học", "target_paper_count": 50}'

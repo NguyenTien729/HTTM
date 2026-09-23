@@ -47,3 +47,28 @@ class ResearchPlan(BaseModel):
 class ResearchPlanResponse(BaseModel):
     id: int
     plan: ResearchPlan
+
+
+# ---- Module Literature Search (V1→V2) ----
+
+class Paper(BaseModel):
+    """Metadata 1 paper — khớp cột trong bảng `papers`."""
+    id: Optional[int] = None
+    project_id: int
+    title: str
+    authors: List[str] = Field(default_factory=list)
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    abstract: Optional[str] = None
+    venue: Optional[str] = None
+    url: Optional[str] = None
+    source: str = "openalex"
+    citation_count: int = 0
+
+
+class SearchResponse(BaseModel):
+    project_id: int
+    query_used: str
+    found: int          # tổng số kết quả thô từ OpenAlex
+    saved: int          # số paper mới thực sự lưu (sau dedup)
+    papers: List[Paper]

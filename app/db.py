@@ -40,9 +40,10 @@ def get_pool() -> asyncpg.Pool:
 
 async def _init_schema(pool: asyncpg.Pool) -> None:
     """
-    Tạo bảng research_projects nếu chưa có.
-    Dùng cột JSONB để lưu toàn bộ research plan (keywords, RQ, search strategy...)
-    — linh hoạt hơn là tách cột cứng ở giai đoạn MVP.
+    Tạo các bảng còn thiếu (idempotent — chạy lại không lỗi).
+
+    research_projects: lưu research plan (JSONB) — module Research Planner (V1).
+    papers: lưu metadata paper lấy về từ Literature Search (OpenAlex...) — module V1→V2.
     """
     async with pool.acquire() as conn:
         await conn.execute(
@@ -54,5 +55,32 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
                 status          TEXT NOT NULL DEFAULT 'planned',
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS papers (
+                id                SERIAL PRIMARY KEY,
+                project_id        INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                title             TEXT NOT NULL,
+                authors           JSONB NOT NULL DEFAULT '[]',
+                year              INTEGER,
+                doi               TEXT,
+                abstract          TEXT,
+                venue             TEXT,
+                url               TEXT,
+                source            TEXT NOT NULL,
+                citation_count    INTEGER NOT NULL DEFAULT 0,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        # Dedup theo DOI: 2 paper cùng DOI trong cùng project không được lưu 2 lần.
+        # Dùng partial unique index vì nhiều paper không có DOI (NULL không xung đột nhau trong Postgres).
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS papers_project_doi_unique
+            ON papers (project_id, doi)
+            WHERE doi IS NOT NULL;
             """
         )

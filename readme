@@ -1,7 +1,16 @@
 pip install -r requirement.txt
+sửa .env theo máy
 
 uvicorn app.main:app --reload --port 8000
 
-curl -X POST http://localhost:8000/plan \
-  -H "Content-Type: application/json" \
-  -d '{"topic": "Tác động của AI đến năng suất sinh viên đại học", "target_paper_count": 50}'
+
+
+http://127.0.0.1:8000/docs
+
+{
+  "topic": "Tác động của AI đến năng suất sinh viên đại học",
+  "language": "vi",
+  "study_type": "survey",
+  "target_paper_count": 50,
+  "target_venue": "null"
+}

@@ -1,4 +1,11 @@
+"""
+Entry point. Chạy:
+    uvicorn app.main:app --reload --port 8000
 
+MVP hiện tại chỉ có Research Planner (module V1 phần 2 trong kế hoạch).
+Các router tiếp theo (search, paper reader, gap detector...) sẽ được
+include ở đây theo cùng pattern.
+"""
 
 from contextlib import asynccontextmanager
 
@@ -8,7 +15,7 @@ load_dotenv()  # đọc .env trước khi bất cứ module nào đọc os.envir
 from fastapi import FastAPI
 
 from app.db import connect_db, close_db
-from app.routers import planner, search, analysis, synthesis
+from app.routers import planner, search, analysis, synthesis, research_questions
 
 
 @asynccontextmanager
@@ -29,6 +36,7 @@ app.include_router(planner.router)
 app.include_router(search.router)
 app.include_router(analysis.router)
 app.include_router(synthesis.router)
+app.include_router(research_questions.router)
 
 
 @app.get("/health")

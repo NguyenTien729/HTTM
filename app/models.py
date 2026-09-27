@@ -29,8 +29,8 @@ class SearchStrategy(BaseModel):
 
 
 class KeywordSynonyms(BaseModel):
-    """Dùng list-of-object thay vì dict với key tự do, vì Gemini structured
-    output (response_schema) hỗ trợ object/array ổn định hơn dict linh hoạt."""
+    """Dùng list-of-object thay vì dict với key tự do, vì cấu trúc object/array
+    được LLM tuân theo ổn định hơn dict với key tự do khi ép structured output."""
     keyword: str
     synonyms: List[str]
 
@@ -77,7 +77,7 @@ class SearchResponse(BaseModel):
 # ---- Module Paper Analyst rút gọn (chỉ dựa trên abstract, chưa đọc full-text PDF) ----
 
 class PaperAnalysisExtraction(BaseModel):
-    """Schema dùng riêng để ép Gemini trả JSON khi phân tích 1 abstract.
+    """Schema dùng riêng để ép LLM trả JSON khi phân tích 1 abstract.
     Không có id/paper_id/project_id — những field đó do code tự gắn sau,
     không để LLM tự sinh (tránh LLM bịa ID)."""
     method: Optional[str] = Field(default=None, description="Phương pháp nghiên cứu, ví dụ: 'Survey', 'Experiment'. Null nếu abstract không nêu rõ.")
@@ -159,3 +159,69 @@ class Gap(BaseModel):
 class GapsResponse(BaseModel):
     project_id: int
     gaps: List[Gap]
+
+
+# ---- Module Research Question Generator ----
+# Chỉ chạy trên gap ĐÃ 👤 confirmed=true — không sinh RQ từ gap chưa được người duyệt.
+
+class VariableExtraction(BaseModel):
+    name: str
+    role: str = Field(description="Một trong: independent, dependent, moderator, mediator, control")
+    description: str
+
+
+class HypothesisExtraction(BaseModel):
+    label: str = Field(description="Ví dụ: 'H1', 'H2'")
+    statement: str = Field(description="Phát biểu giả thuyết đầy đủ, ví dụ: 'AI literacy làm giảm tác động tiêu cực của AI usage lên academic performance.'")
+    independent_variable: str
+    dependent_variable: str
+
+
+class ResearchQuestionExtraction(BaseModel):
+    """Schema ép LLM trả JSON khi sinh RQ từ 1 gap đã duyệt."""
+    candidate_rq: str = Field(description="Câu hỏi nghiên cứu cụ thể, khả thi, trả lời được bằng dữ liệu thực tế.")
+    feasibility_score: int = Field(ge=1, le=5, description="1=rất khó thực hiện, 5=rất khả thi (dữ liệu/phương pháp sẵn có).")
+    feasibility_notes: str = Field(description="Giải thích ngắn cho điểm feasibility — cần dataset gì, phương pháp gì.")
+    novelty_score: int = Field(ge=1, le=5, description="1=trùng lặp nhiều nghiên cứu đã có, 5=rất mới so với literature đã thấy.")
+    novelty_notes: str = Field(description="Giải thích ngắn cho điểm novelty, dựa trên gap đã cho.")
+    is_quantitative: bool = Field(description="RQ này có phù hợp thiết kế định lượng (đo lường biến số, test giả thuyết) không.")
+    variables: List[VariableExtraction] = Field(
+        default_factory=list, description="Chỉ điền nếu is_quantitative=true. Để rỗng nếu định tính."
+    )
+    hypotheses: List[HypothesisExtraction] = Field(
+        default_factory=list, description="Chỉ điền nếu is_quantitative=true. Để rỗng nếu định tính."
+    )
+
+
+class Variable(BaseModel):
+    name: str
+    role: str
+    description: str
+
+
+class Hypothesis(BaseModel):
+    label: str
+    statement: str
+    independent_variable: str
+    dependent_variable: str
+
+
+class ResearchQuestion(BaseModel):
+    """Kết quả sinh RQ — khớp cột bảng `research_questions`."""
+    id: Optional[int] = None
+    project_id: int
+    gap_id: int
+    rq_text: str
+    feasibility_score: int
+    feasibility_notes: str
+    novelty_score: int
+    novelty_notes: str
+    is_quantitative: bool
+    variables: List[Variable] = Field(default_factory=list)
+    hypotheses: List[Hypothesis] = Field(default_factory=list)
+
+
+class GenerateRQResponse(BaseModel):
+    project_id: int
+    gap_id: int
+    research_question: ResearchQuestion

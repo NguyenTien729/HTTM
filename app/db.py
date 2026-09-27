@@ -134,3 +134,25 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             );
             """
         )
+
+        # research_questions: kết quả module RQ Generator. Chỉ sinh từ gap đã confirmed=true
+        # (ràng buộc kiểm tra ở tầng code, không ở DB, để thông báo lỗi rõ ràng hơn cho client).
+        # 1 gap có thể sinh lại nhiều lần (không unique) — mỗi lần chạy lưu thêm 1 dòng mới.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS research_questions (
+                id                  SERIAL PRIMARY KEY,
+                project_id          INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                gap_id              INTEGER NOT NULL REFERENCES gaps(id) ON DELETE CASCADE,
+                rq_text             TEXT NOT NULL,
+                feasibility_score   INTEGER NOT NULL,
+                feasibility_notes   TEXT NOT NULL,
+                novelty_score       INTEGER NOT NULL,
+                novelty_notes       TEXT NOT NULL,
+                is_quantitative     BOOLEAN NOT NULL,
+                variables           JSONB NOT NULL DEFAULT '[]',
+                hypotheses          JSONB NOT NULL DEFAULT '[]',
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )

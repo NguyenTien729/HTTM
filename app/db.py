@@ -84,3 +84,53 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             WHERE doi IS NOT NULL;
             """
         )
+
+        # paper_analyses: kết quả phân tích 1 paper (rút gọn — chỉ dựa trên abstract,
+        # chưa đọc full-text PDF). 1 paper chỉ có tối đa 1 analysis (unique paper_id).
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_analyses (
+                id              SERIAL PRIMARY KEY,
+                paper_id        INTEGER NOT NULL UNIQUE REFERENCES papers(id) ON DELETE CASCADE,
+                project_id      INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                method          TEXT,
+                population      TEXT,
+                context         TEXT,
+                key_finding     TEXT NOT NULL,
+                limitation      TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # themes: kết quả gom cụm của module Synthesis. Mỗi lần chạy lại /synthesize
+        # sẽ xoá theme cũ của project và lưu theme mới (đơn giản cho MVP, chưa versioning).
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS themes (
+                id              SERIAL PRIMARY KEY,
+                project_id      INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL,
+                paper_ids       JSONB NOT NULL DEFAULT '[]',
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # gaps: kết quả module Gap Detector. `confirmed` là checkpoint 👤 human approval —
+        # mặc định false, người dùng phải chủ động duyệt qua endpoint riêng.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gaps (
+                id                          SERIAL PRIMARY KEY,
+                project_id                  INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                gap_type                    TEXT NOT NULL,
+                description                 TEXT NOT NULL,
+                evidence_paper_ids          JSONB NOT NULL DEFAULT '[]',
+                proposed_research_question  TEXT NOT NULL,
+                confirmed                   BOOLEAN NOT NULL DEFAULT false,
+                created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )

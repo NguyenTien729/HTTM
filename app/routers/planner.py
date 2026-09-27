@@ -2,37 +2,30 @@
 Module 2 trong kế hoạch: Research Planner.
 
 Luồng:
-    Topic (+ tuỳ chọn) → Gemini (ép trả JSON qua response_schema) → ResearchPlan
+    Topic (+ tuỳ chọn) → LLM (ép trả JSON qua generate_structured) → ResearchPlan
                         → lưu PostgreSQL → trả về cho client
 
 Điểm quan trọng: KHÔNG prompt LLM trả text tự do rồi tự parse JSON bằng regex.
-Dùng response_schema (Pydantic-native structured output) của Gemini SDK để ép
-đúng schema — response.parsed trả về thẳng object ResearchPlan đã validate.
+Dùng chung helper generate_structured() (app/services/llm.py) để ép đúng schema —
+đổi model provider (Claude/Gemini/DeepSeek...) chỉ cần sửa 1 chỗ duy nhất ở đó.
 """
 
-import os
 import json
 import logging
 
 from fastapi import APIRouter, HTTPException
-from google import genai
-from google.genai import types
 
 from app.models import ResearchPlanRequest, ResearchPlanResponse, ResearchPlan
 from app.db import get_pool
+from app.services.llm import generate_structured
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plan", tags=["planner"])
 
-# Đọc GEMINI_API_KEY từ env tự động (client cũng nhận qua api_key=... nếu muốn set thủ công)
-_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
 
 async def generate_research_plan(payload: ResearchPlanRequest) -> ResearchPlan:
-    """Gọi Gemini Pro, ép trả JSON đúng schema ResearchPlan, trả về object đã validate."""
-    model = os.environ.get("GEMINI_MODEL", "gemini-3-pro-preview")
-
-    user_prompt = (
+    """Gọi LLM, ép trả JSON đúng schema ResearchPlan, trả về object đã validate."""
+    prompt = (
         f"Chủ đề nghiên cứu: {payload.topic}\n"
         f"Ngôn ngữ mong muốn cho tài liệu: {payload.language}\n"
         f"Loại nghiên cứu mong muốn: {payload.study_type or 'không chỉ định'}\n"
@@ -43,25 +36,7 @@ async def generate_research_plan(payload: ResearchPlanRequest) -> ResearchPlan:
         "từ đồng nghĩa cho mỗi từ khoá, các câu hỏi nghiên cứu khả thi, "
         "và chiến lược tìm kiếm (nguồn dữ liệu, khoảng thời gian, loại nghiên cứu)."
     )
-
-    try:
-        response = await _client.aio.models.generate_content(
-            model=model,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ResearchPlan,
-            ),
-        )
-    except Exception as exc:
-        logger.error("Lỗi khi gọi Gemini API: %s", exc)
-        raise HTTPException(status_code=502, detail="Không gọi được Gemini API.")
-
-    if response.parsed is None:
-        logger.error("Gemini không trả JSON đúng schema. Raw text: %s", response.text)
-        raise HTTPException(status_code=502, detail="LLM không trả về research plan hợp lệ.")
-
-    return response.parsed
+    return await generate_structured(prompt, ResearchPlan)
 
 
 @router.post("", response_model=ResearchPlanResponse)

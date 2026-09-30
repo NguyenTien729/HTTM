@@ -15,7 +15,7 @@ load_dotenv()  # đọc .env trước khi bất cứ module nào đọc os.envir
 from fastapi import FastAPI
 
 from app.db import connect_db, close_db
-from app.routers import planner, search, analysis, synthesis, research_questions
+from app.routers import planner, search, analysis, synthesis, research_questions, writer, related_work, export
 
 
 @asynccontextmanager
@@ -37,6 +37,9 @@ app.include_router(search.router)
 app.include_router(analysis.router)
 app.include_router(synthesis.router)
 app.include_router(research_questions.router)
+app.include_router(writer.router)
+app.include_router(related_work.router)
+app.include_router(export.router)
 
 
 @app.get("/health")

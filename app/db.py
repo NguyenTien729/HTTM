@@ -156,3 +156,44 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             );
             """
         )
+
+
+        # introductions: kết quả module Scientific Writer (phần Introduction).
+        # citations_used/citations_invalid do CODE tính sau khi verify — không phải LLM tự khai.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS introductions (
+                id                              SERIAL PRIMARY KEY,
+                project_id                      INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                research_question_id            INTEGER NOT NULL REFERENCES research_questions(id) ON DELETE CASCADE,
+                background                      TEXT NOT NULL,
+                problem_statement               TEXT NOT NULL,
+                existing_knowledge              TEXT NOT NULL,
+                literature_limitation           TEXT NOT NULL,
+                research_gap_statement          TEXT NOT NULL,
+                research_question_statement     TEXT NOT NULL,
+                contribution_statement          TEXT NOT NULL,
+                citations_used                  JSONB NOT NULL DEFAULT '[]',
+                citations_invalid               JSONB NOT NULL DEFAULT '[]',
+                created_at                      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # related_works: kết quả module Scientific Writer (phần Related Work).
+        # theme_paragraphs là mảng {theme_name, paragraph} — 1 phần tử / theme.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS related_works (
+                id                          SERIAL PRIMARY KEY,
+                project_id                  INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                research_question_id        INTEGER NOT NULL REFERENCES research_questions(id) ON DELETE CASCADE,
+                theme_paragraphs            JSONB NOT NULL DEFAULT '[]',
+                contradictions_paragraph    TEXT NOT NULL,
+                gap_paragraph               TEXT NOT NULL,
+                citations_used              JSONB NOT NULL DEFAULT '[]',
+                citations_invalid           JSONB NOT NULL DEFAULT '[]',
+                created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )

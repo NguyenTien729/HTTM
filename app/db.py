@@ -5,9 +5,11 @@ cho module Research Planner (V1). Các bảng papers/chunks/claims sẽ
 """
 
 import os
+import logging
 import asyncpg
 from typing import Optional
 
+logger = logging.getLogger(__name__)
 _pool: Optional[asyncpg.Pool] = None
 
 
@@ -194,6 +196,35 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
                 citations_used              JSONB NOT NULL DEFAULT '[]',
                 citations_invalid           JSONB NOT NULL DEFAULT '[]',
                 created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # ---- Paper Reader (full-text) ----
+        # pdf_url: link PDF open-access (OpenAlex/Semantic Scholar). ALTER idempotent nên DB cũ vẫn chạy.
+        await conn.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS pdf_url TEXT;")
+
+        # paper_chunks: full-text chia đoạn. Cột embedding dùng pgvector; nếu DB không có
+        # extension `vector` (image postgres thường) thì vẫn tạo bảng nhưng KHÔNG có cột embedding,
+        # khi đó chunk_store tự chuyển sang xếp hạng theo từ khoá.
+        embedding_dim = int(os.environ.get("EMBEDDING_DIM", "1536"))
+        has_vector = True
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        except Exception as exc:  # noqa: BLE001
+            has_vector = False
+            logger.warning("Không bật được pgvector (%s) — paper_chunks sẽ không có embedding.", exc)
+        embedding_col = f"embedding vector({embedding_dim})," if has_vector else ""
+        await conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS paper_chunks (
+                id              SERIAL PRIMARY KEY,
+                paper_id        INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                chunk_index     INTEGER NOT NULL,
+                chunk_text      TEXT NOT NULL,
+                {embedding_col}
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (paper_id, chunk_index)
             );
             """
         )

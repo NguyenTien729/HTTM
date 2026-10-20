@@ -64,6 +64,7 @@ class Paper(BaseModel):
     url: Optional[str] = None
     source: str = "openalex"
     citation_count: int = 0
+    pdf_url: Optional[str] = None   # link PDF open-access (nếu có) — dùng cho Paper Reader full-text
 
 
 class SearchResponse(BaseModel):
@@ -103,6 +104,7 @@ class AnalyzeResponse(BaseModel):
     project_id: int
     analyzed_now: int          # số paper vừa phân tích trong lần gọi này
     total_analyzed: int        # tổng số paper đã có phân tích (kể cả trước đó)
+    fulltext_used: int = 0     # số paper trong lần gọi này được phân tích bằng full-text PDF
     analyses: List[PaperAnalysis]
 
 

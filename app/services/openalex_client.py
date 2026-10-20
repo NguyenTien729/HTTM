@@ -58,6 +58,9 @@ def _parse_work(raw: dict, project_id: int) -> Paper:
     if doi:
         doi = doi.replace("https://doi.org/", "")
 
+    best_oa = raw.get("best_oa_location") or {}
+    pdf_url = best_oa.get("pdf_url") or (raw.get("open_access") or {}).get("oa_url")
+
     return Paper(
         project_id=project_id,
         title=raw.get("title") or "(không có tiêu đề)",
@@ -69,6 +72,7 @@ def _parse_work(raw: dict, project_id: int) -> Paper:
         url=primary_location.get("landing_page_url") or raw.get("id"),
         source="openalex",
         citation_count=raw.get("cited_by_count") or 0,
+        pdf_url=pdf_url,
     )
 
 

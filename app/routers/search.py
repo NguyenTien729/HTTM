@@ -13,6 +13,7 @@ Luồng:
 Không để LLM tự nhớ paper — toàn bộ metadata lấy trực tiếp từ OpenAlex.
 """
 
+import os
 import json
 import logging
 
@@ -22,6 +23,8 @@ from app.models import ResearchPlan, SearchResponse, Paper
 from app.db import get_pool
 from app.services.query_builder import build_query_from_plan
 from app.services.openalex_client import search_openalex
+from app.services.semantic_scholar_client import search_semantic_scholar
+from app.services.paper_merge import merge_papers
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/search", tags=["literature-search"])
@@ -49,13 +52,17 @@ async def _save_papers(papers: list[Paper]) -> int:
     async with pool.acquire() as conn:
         async with conn.transaction():
             for paper in papers:
+                # Trùng DOI: không tạo dòng mới nhưng bổ sung abstract/pdf_url nếu bản cũ còn thiếu.
+                # (xmax = 0) chỉ đúng với dòng mới INSERT -> đếm đúng số paper thực sự mới.
                 row = await conn.fetchrow(
                     """
                     INSERT INTO papers
-                        (project_id, title, authors, year, doi, abstract, venue, url, source, citation_count)
-                    VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10)
-                    ON CONFLICT (project_id, doi) WHERE doi IS NOT NULL DO NOTHING
-                    RETURNING id;
+                        (project_id, title, authors, year, doi, abstract, venue, url, source, citation_count, pdf_url)
+                    VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (project_id, doi) WHERE doi IS NOT NULL DO UPDATE SET
+                        pdf_url  = COALESCE(papers.pdf_url, EXCLUDED.pdf_url),
+                        abstract = COALESCE(NULLIF(papers.abstract, ''), EXCLUDED.abstract)
+                    RETURNING id, (xmax = 0) AS inserted;
                     """,
                     paper.project_id,
                     paper.title,
@@ -67,8 +74,9 @@ async def _save_papers(papers: list[Paper]) -> int:
                     paper.url,
                     paper.source,
                     paper.citation_count,
+                    paper.pdf_url,
                 )
-                if row is not None:
+                if row is not None and row["inserted"]:
                     saved_count += 1
     return saved_count
 
@@ -88,6 +96,18 @@ async def run_search(project_id: int) -> SearchResponse:
         )
     except Exception:
         raise HTTPException(status_code=502, detail="Không gọi được OpenAlex API.")
+
+    # Nguồn thứ 2 (Semantic Scholar): lỗi/rate-limit thì bỏ qua, OpenAlex vẫn đủ dùng.
+    # Tắt bằng ENABLE_SEMANTIC_SCHOLAR=0.
+    if os.environ.get("ENABLE_SEMANTIC_SCHOLAR", "1") != "0":
+        s2_query = " ".join(plan.keywords[:4]) or plan.topic
+        extra = await search_semantic_scholar(
+            query=s2_query,
+            project_id=project_id,
+            date_range=plan.search_strategy.date_range,
+            limit=plan.search_strategy.target_paper_count,
+        )
+        papers = merge_papers(papers, extra)
 
     saved = await _save_papers(papers)
 
@@ -122,6 +142,7 @@ async def list_papers(project_id: int) -> list[Paper]:
             url=r["url"],
             source=r["source"],
             citation_count=r["citation_count"],
+            pdf_url=r["pdf_url"],
         )
         for r in rows
     ]

@@ -16,11 +16,12 @@ LỊCH SỬ THIẾT KẾ (quan trọng để hiểu tại sao code như hiện t
 import os
 import re
 import json
+import asyncio
 import logging
 from typing import TypeVar, Type, Optional
 
 from fastapi import HTTPException
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError, APIConnectionError
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,14 @@ _client = AsyncOpenAI(
 
 T = TypeVar("T", bound=BaseModel)
 
-_MAX_ATTEMPTS = 3
+_MAX_ATTEMPTS = 4
+_FATAL_STATUS = {400, 401, 402, 403, 404, 422}  # lỗi retry cũng vô ích (sai key, hết tiền, request sai)
+
+
+def _backoff(attempt: int) -> float:
+    return min(2 ** attempt, 15)  # 2s, 4s, 8s, ...
+
+
 _MAX_TOKENS = 8000  # rộng rãi cho output dài kiểu Related Work (nhiều theme/đoạn văn)
 
 # Lớp phòng thủ thêm: nếu model vẫn lỡ trả literal kiểu Python (Null/True/False viết
@@ -82,6 +90,7 @@ async def generate_structured(prompt: str, schema: Type[T]) -> T:
     )
 
     last_error_detail = "Không rõ nguyên nhân."
+    prompt_suffix = ""  # thêm vào prompt khi lần trước bị cắt cụt
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -89,12 +98,29 @@ async def generate_structured(prompt: str, schema: Type[T]) -> T:
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": prompt + prompt_suffix},
                 ],
                 response_format={"type": "json_object"},
                 max_tokens=_MAX_TOKENS,
                 extra_body={"thinking": {"type": "disabled"}},
             )
+        except APIStatusError as exc:
+            logger.error("DeepSeek HTTP %s (lần %d/%d): %s", exc.status_code, attempt, _MAX_ATTEMPTS, exc)
+            if exc.status_code in _FATAL_STATUS:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"DeepSeek từ chối request (HTTP {exc.status_code}): {exc.message}",
+                )
+            last_error_detail = f"Lỗi API HTTP {exc.status_code}: {exc.message}"
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_backoff(attempt))
+            continue
+        except APIConnectionError as exc:
+            logger.error("Lỗi kết nối DeepSeek (lần %d/%d): %s", attempt, _MAX_ATTEMPTS, exc)
+            last_error_detail = f"Lỗi kết nối/timeout: {exc}"
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_backoff(attempt))
+            continue
         except Exception as exc:
             logger.error("Lỗi khi gọi DeepSeek API (lần %d/%d): %s", attempt, _MAX_ATTEMPTS, exc)
             last_error_detail = f"Lỗi gọi API: {exc}"
@@ -110,6 +136,11 @@ async def generate_structured(prompt: str, schema: Type[T]) -> T:
                 _MAX_TOKENS, attempt, _MAX_ATTEMPTS,
             )
             last_error_detail = "Output bị cắt cụt do vượt quá max_tokens."
+            prompt_suffix = (
+                "\n\nLƯU Ý: lần trước output quá dài và bị cắt cụt. "
+                "Hãy viết NGẮN HƠN khoảng một nửa (ít đoạn hơn, mỗi đoạn ngắn hơn), "
+                "và bảo đảm JSON đóng ngoặc đầy đủ."
+            )
             continue
 
         if not content:

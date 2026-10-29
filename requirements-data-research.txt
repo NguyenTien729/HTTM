@@ -1,0 +1,5 @@
+# Additional packages for Data Research (httpx is already in HTTM requirements.txt)
+pandas>=2.2,<4
+numpy>=1.26,<3
+scipy>=1.13,<2
+pyarrow>=17,<30

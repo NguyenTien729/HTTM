@@ -25,12 +25,15 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
+from app.data_research.router import router as data_research_router
 app = FastAPI(
     title="Research Copilot API",
     description="Hệ thống hỗ trợ nghiên cứu khoa học có kiểm chứng (V1: Research Planner).",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.include_router(data_research_router)
 
 app.include_router(planner.router)
 app.include_router(search.router)

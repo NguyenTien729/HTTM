@@ -643,8 +643,11 @@ def analyze_dataframe(
     metadata["categorical_columns"] = categorical_cols
     metadata["rows_analyzed"] = actual_rows
 
+    research_topic = str(metadata.get("research_topic") or "").strip()
+    topic_context = f"Chủ đề nghiên cứu được kế thừa từ Research Planner: {research_topic}. " if research_topic else ""
     methods_draft = (
-        f"Dữ liệu được lấy từ dataset công khai `{metadata.get('dataset_id', 'unknown')}` trên Hugging Face "
+        topic_context
+        + f"Dữ liệu được lấy từ dataset công khai `{metadata.get('dataset_id', 'unknown')}` trên Hugging Face "
         f"(config: `{metadata.get('config', 'unknown')}`, split: `{metadata.get('split', 'unknown')}`). "
         f"Split được xử lý bằng Parquet; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
         f"{('Do split lớn hơn giới hạn xử lý, ' + str(metadata.get('sampling_method')) + ' được sử dụng. ') if metadata.get('sampled') else 'Toàn bộ các dòng trong split được đưa vào phân tích. '}"
@@ -654,10 +657,16 @@ def analyze_dataframe(
         "Các phép kiểm định được xem là phân tích khám phá; cần kiểm tra giả định, cách lấy mẫu, dữ liệu thiếu và hiệu chỉnh đa kiểm định trước khi đưa ra kết luận chính thức."
     )
 
-    results_sentences = [
+    results_sentences = []
+    if research_topic:
+        results_sentences.append(
+            f"Phân tích được thực hiện trong bối cảnh chủ đề nghiên cứu: {research_topic}. "
+            "Các thống kê dưới đây mô tả dataset đã chọn và tự thân chưa đủ để kết luận giả thuyết nghiên cứu."
+        )
+    results_sentences.extend([
         f"Bộ dữ liệu được phân tích gồm {actual_rows:,} dòng và {len(frame.columns)} cột; có {len(numeric_cols)} biến số và {len(categorical_cols)} biến phân loại nhận diện tự động.",
         f"Có {sum(x['missing_count'] for x in missing_by_col):,} ô thiếu tính trên toàn bộ bảng phân tích; số dòng trùng hoàn toàn là {duplicate_rows if duplicate_rows is not None else 'chưa xác định'}.",
-    ]
+    ])
     if numeric_cols:
         highlights = []
         for col in numeric_cols[:5]:

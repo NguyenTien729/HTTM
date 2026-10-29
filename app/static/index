@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Copilot</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mut:#6a737d;--bd:#d8dee4;--ac:#2457d6;--ok:#1a7f37;--er:#cf222e;--wa:#9a6700;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--tx:#e6edf3;--mut:#8b949e;--bd:#30363d;--ac:#6ea0ff;--ok:#3fb950;--er:#ff7b72;--wa:#d29922;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 80px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-size:22px;margin:0}
+.sub{color:var(--mut);font-size:13px;margin:0 0 20px}
+.step{display:flex;gap:12px;margin-bottom:10px}
+.dot{flex:none;width:28px;height:28px;border-radius:50%;border:2px solid var(--bd);display:grid;place-items:center;font-size:13px;color:var(--mut);background:var(--card)}
+.step.done .dot{background:var(--ok);border-color:var(--ok);color:#fff}
+.step.run .dot{border-color:var(--ac);color:var(--ac);animation:pulse 1s infinite}
+.step.wait .dot{background:var(--wa);border-color:var(--wa);color:#fff}
+.step.err .dot{background:var(--er);border-color:var(--er);color:#fff}
+@keyframes pulse{50%{opacity:.4}}
+.card{flex:1;min-width:0;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px}
+.step.wait .card{border-color:var(--wa);box-shadow:0 0 0 2px color-mix(in srgb,var(--wa) 25%,transparent)}
+.step.pending .card{opacity:.55}
+.ttl{font-weight:600}
+.tag{font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;margin-left:8px;background:var(--wa);color:#fff;vertical-align:1px}
+.sum{color:var(--mut);font-size:13px}
+.body{margin-top:8px}
+.body:empty{display:none}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:inherit}
+input[type=checkbox],input[type=radio]{width:auto;margin-right:6px}
+button,.btn{display:inline-block;margin-top:10px;padding:7px 14px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);font:inherit;cursor:pointer;text-decoration:none}
+button.pri,.btn{background:var(--ac);border-color:var(--ac);color:#fff}
+button:disabled{opacity:.5;cursor:wait}
+button+button{margin-left:8px}
+.err{color:var(--er);font-size:13px;margin-top:8px;white-space:pre-wrap}
+.warn{color:var(--wa);font-size:13px;margin-top:6px}
+.opt{display:block;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;margin:6px 0;cursor:pointer;color:var(--tx);font-size:14px}
+.opt:has(input:checked){border-color:var(--ac);background:color-mix(in srgb,var(--ac) 8%,transparent)}
+.opt small{display:block;color:var(--mut)}
+details{margin-top:6px;font-size:13px}
+summary{cursor:pointer;color:var(--ac)}
+.pre{white-space:pre-wrap;margin-top:4px;color:var(--tx)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;font-size:12px;margin-top:6px}
+th,td{border:1px solid var(--bd);padding:3px 7px;text-align:left;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis}
+.row{display:flex;gap:12px;flex-wrap:wrap}.row>*{flex:1;min-width:160px}
+ul{margin:4px 0;padding-left:20px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Research Copilot</h1>
+    <button id="reset">Bắt đầu lại</button>
+  </header>
+  <p class="sub">Hệ thống tự chạy toàn bộ quy trình và chỉ dừng lại (nhãn <b>cần bạn</b>) ở những bước cần quyết định của người nghiên cứu.</p>
+  <div id="steps"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e[k] = v;
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat().filter(c => c !== false && c != null)) e.append(c.nodeType ? c : document.createTextNode(c));
+  return e;
+};
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) {
+    let d; try { d = (await r.json()).detail } catch {}
+    throw new Error(typeof d === 'string' ? d : (d ? JSON.stringify(d) : 'Lỗi HTTP ' + r.status));
+  }
+  return r;
+}
+const J = async (m, p, b) => (await api(m, p, b)).json();
+const det = (title, text) => h('details', {}, h('summary', {}, title), h('div', { class: 'pre' }, text));
+const lines = arr => h('ul', {}, arr.map(x => h('li', {}, x)));
+function table(rows, cols) {
+  return h('div', { class: 'scroll' }, h('table', {},
+    h('tr', {}, cols.map(c => h('th', {}, c))),
+    rows.map(r => h('tr', {}, cols.map(c => h('td', { title: String(r[c] ?? '') }, r[c] == null ? '' : typeof r[c] === 'object' ? JSON.stringify(r[c]) : String(r[c])))))));
+}
+// Chặn tại bước cần user: chạy fn khi bấm nút; lỗi thì hiện ngay tại chỗ, thành công thì mở khoá bước kế tiếp.
+const gate = (box, label, fn) => new Promise(res => {
+  const err = h('div', { class: 'err' });
+  const b = h('button', { class: 'pri', onclick: async () => {
+    b.disabled = true; err.textContent = '';
+    try { res(await fn()) } catch (e) { err.textContent = e.message; b.disabled = false }
+  } }, label);
+  box.append(err, b);
+});
+
+const KEY = 'httm_state_v1';
+let S = (() => { try { return JSON.parse(localStorage.getItem(KEY)) } catch { return null } })() || { i: 0, ctx: {}, sum: [] };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)) } catch {} };
+
+// ------------------------------------------------------------------ STEPS
+// input:true = dừng chờ người dùng. back = bước quay lại khi lỗi do lựa chọn của người dùng.
+const STEPS = [
+  { t: 'Nhập đề tài nghiên cứu', input: true, async run(c, box) {
+    const topic = h('textarea', { rows: 2, placeholder: 'Ví dụ: Tác động của AI đến năng suất sinh viên đại học' }, c.topic || '');
+    const lang = h('select', {}, h('option', { value: 'vi' }, 'Tiếng Việt'), h('option', { value: 'en' }, 'English'));
+    const n = h('input', { type: 'number', min: 1, max: 500, value: 30 });
+    const type = h('input', { placeholder: 'survey / experiment / review (tuỳ chọn)' });
+    box.append(h('label', {}, 'Đề tài'), topic, h('div', { class: 'row' },
+      h('div', {}, h('label', {}, 'Ngôn ngữ paper'), lang), h('div', {}, h('label', {}, 'Số paper mục tiêu'), n), h('div', {}, h('label', {}, 'Loại nghiên cứu'), type)));
+    return gate(box, 'Bắt đầu', async () => {
+      if (topic.value.trim().length < 5) throw new Error('Hãy nhập đề tài (ít nhất 5 ký tự).');
+      const body = { topic: topic.value.trim(), language: lang.value, target_paper_count: +n.value || 30 };
+      if (type.value.trim()) body.study_type = type.value.trim();
+      const r = await J('POST', '/plan', body);
+      Object.assign(c, { pid: r.id, topic: body.topic, plan: r.plan });
+      box.replaceChildren(h('div', {}, 'Project #' + r.id + ' — từ khoá: ' + (r.plan.keywords || []).join(', ')));
+      return 'Project #' + r.id;
+    });
+  } },
+  { t: 'Tìm tài liệu (OpenAlex)', async run(c, box) {
+    const r = await J('POST', '/search/' + c.pid);
+    box.append(det('Danh sách paper', (r.papers || []).map(p => '• ' + p.title).join('\n')));
+    return `Tìm thấy ${r.found}, lưu mới ${r.saved} paper`;
+  } },
+  { t: 'Phân tích từng paper', async run(c, box) {
+    const r = await J('POST', '/analyze/' + c.pid);
+    box.append(det('Phát hiện chính của từng paper', r.analyses.map(a => `• [${a.paper_id}] ${a.key_finding}`).join('\n')));
+    return `${r.total_analyzed} paper đã phân tích (${r.fulltext_used} bằng full-text)`;
+  } },
+  { t: 'Tổng hợp theo chủ đề (themes)', async run(c, box) {
+    const r = await J('POST', '/synthesize/' + c.pid);
+    box.append(lines(r.themes.map(t => `${t.name} (${t.paper_ids.length} paper)`)));
+    return r.themes.length + ' theme';
+  } },
+  { t: 'Phát hiện research gap', async run(c, box) {
+    const r = await J('POST', `/synthesize/${c.pid}/gaps`);
+    c.gaps = r.gaps;
+    return r.gaps.length + ' gap được đề xuất';
+  } },
+  { t: 'Duyệt research gap', input: true, async run(c, box) {
+    if (!c.gaps?.length) throw new Error('Không có gap nào được đề xuất. Hãy bấm "Bắt đầu lại" hoặc thử đề tài khác.');
+    box.append(h('div', { class: 'warn' }, 'Chỉ gap bạn duyệt mới được dùng để sinh câu hỏi nghiên cứu. Hãy kiểm tra gap có thật hay chỉ là "chưa tìm thấy trong tập paper đã search".'));
+    const radios = c.gaps.map(g => h('label', { class: 'opt' },
+      h('input', { type: 'radio', name: 'gap', value: g.id }), h('b', {}, g.gap_type), ' — ' + g.description,
+      h('small', {}, 'RQ gợi ý: ' + g.proposed_research_question), h('small', {}, 'Bằng chứng: paper ' + g.evidence_paper_ids.join(', '))));
+    box.append(...radios);
+    return gate(box, 'Duyệt gap đã chọn', async () => {
+      const sel = box.querySelector('input[name=gap]:checked');
+      if (!sel) throw new Error('Hãy chọn một gap.');
+      await J('POST', `/synthesize/${c.pid}/gaps/${sel.value}/approve`);
+      c.gapId = +sel.value;
+      const g = c.gaps.find(x => x.id === c.gapId);
+      box.replaceChildren(h('div', {}, 'Đã duyệt: ' + g.description));
+      return 'Đã duyệt gap #' + c.gapId;
+    });
+  } },
+  { t: 'Sinh câu hỏi nghiên cứu & giả thuyết', async run(c, box) {
+    const r = await J('POST', '/research-questions/gap/' + c.gapId);
+    const q = r.research_question;
+    c.rqId = q.id; c.rq = q;
+    box.append(h('div', {}, h('b', {}, 'RQ: '), q.rq_text),
+      q.variables?.length ? lines(q.variables.map(v => `${v.name} (${v.role})`)) : '',
+      q.hypotheses?.length ? lines(q.hypotheses.map(x => `${x.label}: ${x.statement}`)) : '');
+    return 'RQ #' + q.id;
+  } },
+  { t: 'Viết Introduction', async run(c, box) {
+    const r = (await J('POST', '/write/introduction/' + c.rqId)).introduction;
+    box.append(det('Nội dung', [r.background, r.problem_statement, r.existing_knowledge, r.literature_limitation, r.research_gap_statement, r.research_question_statement, r.contribution_statement].join('\n\n')));
+    if (r.citations_invalid?.length) box.append(h('div', { class: 'warn' }, 'Citation không có thật (sẽ bị xoá khi xuất): ' + r.citations_invalid.join(', ')));
+    return `${r.citations_used.length} citation hợp lệ`;
+  } },
+  { t: 'Viết Related Work', async run(c, box) {
+    const r = (await J('POST', '/write/related-work/' + c.rqId)).related_work;
+    box.append(det('Nội dung', [...r.theme_paragraphs.map(t => t.theme_name + '\n' + t.paragraph), r.contradictions_paragraph, r.gap_paragraph].join('\n\n')));
+    if (r.citations_invalid?.length) box.append(h('div', { class: 'warn' }, 'Citation không có thật (sẽ bị xoá khi xuất): ' + r.citations_invalid.join(', ')));
+    return `${r.citations_used.length} citation hợp lệ`;
+  } },
+  { t: 'Tìm dataset công khai (Hugging Face)', async run(c, box) {
+    const r = await J('POST', '/data-research/discover', { topic: c.topic, limit: 10 });
+    c.datasets = r.datasets;
+    return r.datasets.length + ' dataset ứng viên';
+  } },
+  { t: 'Chọn dataset', input: true, async run(c, box) {
+    box.append(h('div', { class: 'warn' }, 'Điểm khớp chỉ dựa trên metadata, không đảm bảo nội dung phù hợp. Hãy xem mô tả và giấy phép.'));
+    box.append(...c.datasets.map(d => h('label', { class: 'opt' },
+      h('input', { type: 'radio', name: 'ds', value: d.dataset_id }), h('b', {}, d.dataset_id), ` (khớp ${d.topic_match_score}, ${d.downloads} lượt tải, license: ${d.license || 'không rõ'})`,
+      h('small', {}, (d.description || '(không có mô tả)').slice(0, 300)), h('a', { href: d.dataset_url, target: '_blank', rel: 'noopener' }, 'Mở trên Hugging Face'))));
+    const own = h('input', { placeholder: 'hoặc nhập thủ công: owner/dataset-name' });
+    box.append(h('label', {}, 'Dataset khác'), own);
+    return gate(box, 'Chọn dataset này', async () => {
+      const sel = box.querySelector('input[name=ds]:checked');
+      c.datasetId = own.value.trim() || sel?.value;
+      if (!c.datasetId) throw new Error('Hãy chọn hoặc nhập một dataset.');
+      box.replaceChildren(h('div', {}, 'Đã chọn: ' + c.datasetId));
+      return c.datasetId;
+    });
+  } },
+  { t: 'Kiểm tra dataset (cột, split, dòng mẫu)', back: 10, async run(c, box) {
+    const r = await J('POST', '/data-research/inspect', { dataset_id: c.datasetId });
+    c.insp = { splits: r.available_splits, columns: r.columns, preview: r.preview_rows.slice(0, 5), checklist: r.review_checklist, total: r.num_rows_total };
+    return `${r.columns.length} cột, ${r.available_splits.length} split`;
+  } },
+  { t: 'Xác nhận dataset & biến phân tích', input: true, async run(c, box) {
+    const I = c.insp, cols = I.columns.map(x => x.name);
+    box.append(h('div', { class: 'warn' }, 'Kiểm tra trước khi phân tích:'), lines(I.checklist));
+    if (c.rq?.variables?.length) box.append(h('div', { class: 'sum' }, 'Biến trong RQ: ' + c.rq.variables.map(v => `${v.name} (${v.role})`).join('; ')));
+    box.append(h('b', {}, 'Dòng mẫu'), table(I.preview, cols.slice(0, 8)));
+    const split = h('select', {}, I.splits.map((s, k) => h('option', { value: k }, `${s.config} / ${s.split} (${s.num_rows ?? '?'} dòng)`)));
+    const opt = (none) => [h('option', { value: '' }, none), ...cols.map(x => h('option', { value: x }, x))];
+    const target = h('select', {}, opt('— không chọn —')), group = h('select', {}, opt('— không chọn —'));
+    const maxRows = h('input', { type: 'number', min: 100, max: 100000, value: 50000 });
+    const preds = h('div', {}, cols.map(x => h('label', { class: 'opt' }, h('input', { type: 'checkbox', value: x }), x)));
+    const ok = h('input', { type: 'checkbox' });
+    box.append(h('label', {}, 'Split dùng để phân tích'), split,
+      h('div', { class: 'row' }, h('div', {}, h('label', {}, 'Biến phụ thuộc (target)'), target), h('div', {}, h('label', {}, 'Biến nhóm (group)'), group), h('div', {}, h('label', {}, 'Số dòng tối đa'), maxRows)),
+      h('label', {}, 'Biến giải thích cho hồi quy OLS (biến số, tối đa 10, tuỳ chọn)'), preds,
+      h('label', { class: 'opt' }, ok, 'Tôi đã xem dataset, đồng ý chọn và hiểu đây là phân tích khám phá, không chứng minh nhân quả.'));
+    return gate(box, 'Xác nhận và phân tích', async () => {
+      if (!ok.checked) throw new Error('Hãy tick xác nhận trước khi phân tích.');
+      const p = [...preds.querySelectorAll('input:checked')].map(x => x.value);
+      if (p.length > 10) throw new Error('Chọn tối đa 10 biến giải thích.');
+      const s = I.splits[+split.value];
+      c.sel = { dataset_id: c.datasetId, config: s.config, split: s.split, confirm_dataset: true, max_rows: +maxRows.value || 50000, predictor_columns: p };
+      if (target.value) c.sel.target_column = target.value;
+      if (group.value) c.sel.group_column = group.value;
+      box.replaceChildren(h('div', {}, `Đã xác nhận: ${c.datasetId} — ${s.config}/${s.split}`));
+      return `${s.config}/${s.split}`;
+    });
+  } },
+  { t: 'Chạy thống kê trên dataset', back: 12, async run(c, box) {
+    c.analysis = await J('POST', '/data-research/analyze', c.sel);
+    const o = c.analysis.overview;
+    box.append(det('Results (bản nháp từ số liệu thật)', c.analysis.results_draft));
+    return `${o.rows_analyzed.toLocaleString()} dòng, ${o.columns_count} cột`;
+  } },
+  { t: 'Viết Discussion & Conclusion', async run(c, box) {
+    const d = (await J('POST', '/write/discussion/' + c.rqId, { analysis_result: c.analysis })).discussion;
+    box.append(det('Conclusion', d.conclusion_paragraph), lines(d.hypothesis_assessments.map(a => `${a.label}: ${a.verdict}`)));
+    if (d.numbers_unverified?.length) box.append(h('div', { class: 'warn' }, 'Số liệu chưa khớp kết quả phân tích — cần kiểm tra tay: ' + d.numbers_unverified.join(', ')));
+    if (d.citations_invalid?.length) box.append(h('div', { class: 'warn' }, 'Citation không có thật (sẽ bị xoá khi xuất): ' + d.citations_invalid.join(', ')));
+    return 'Đã viết xong';
+  } },
+  { t: 'Xuất bài báo (PDF)', async run(c, box) {
+    const blob = await (await api('POST', '/export/paper/' + c.rqId)).blob();
+    const a = h('a', { class: 'btn', href: URL.createObjectURL(blob), download: `research_paper_rq_${c.rqId}.pdf` }, 'Tải bài báo (PDF)');
+    box.append(a, h('div', { class: 'sum' }, 'Xem trang cuối của PDF: "Ghi chú dành cho tác giả".'));
+    a.click();
+    return 'Hoàn tất';
+  } },
+];
+
+// ------------------------------------------------------------------ ENGINE
+const cards = STEPS.map((st, i) => {
+  const dot = h('div', { class: 'dot' }, i + 1), ttl = h('span', { class: 'ttl' }, st.t), tag = st.input ? h('span', { class: 'tag' }, 'cần bạn') : '';
+  const sum = h('div', { class: 'sum' }), body = h('div', { class: 'body' });
+  const el = h('div', { class: 'step pending' }, dot, h('div', { class: 'card' }, ttl, tag, sum, body));
+  $('#steps').append(el);
+  return { el, dot, sum, body };
+});
+function status(i, s, text) {
+  const c = cards[i];
+  c.el.className = 'step ' + s;
+  c.dot.textContent = s === 'done' ? '✓' : s === 'err' ? '!' : s === 'wait' ? '?' : i + 1;
+  if (text != null) c.sum.textContent = text;
+}
+STEPS.forEach((_, i) => { if (i < S.i) status(i, 'done', S.sum[i] || ''); });
+
+let busy = false;
+async function loop() {
+  if (busy) return;
+  busy = true;
+  while (S.i < STEPS.length) {
+    const i = S.i, st = STEPS[i], card = cards[i];
+    status(i, st.input ? 'wait' : 'run', st.input ? 'Cần bạn quyết định để tiếp tục' : 'Đang chạy…');
+    card.body.replaceChildren();
+    card.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    try {
+      const sum = await st.run(S.ctx, card.body);
+      S.sum[i] = sum || '';
+      status(i, 'done', S.sum[i]);
+      S.i++; save();
+    } catch (e) {
+      status(i, 'err', 'Lỗi');
+      const again = h('button', { class: 'pri', onclick: () => { busy = false; loop() } }, 'Thử lại');
+      card.body.append(h('div', { class: 'err' }, e.message), again);
+      if (st.back != null) card.body.append(h('button', { onclick: () => { S.i = st.back; save(); STEPS.forEach((_, k) => k >= S.i && status(k, 'pending', '')); busy = false; loop() } }, 'Quay lại bước chọn'));
+      busy = false; return;
+    }
+  }
+  busy = false;
+  $('#steps').append(h('button', { class: 'pri', onclick: () => $('#reset').click() }, 'Bắt đầu nghiên cứu mới'));
+}
+$('#reset').onclick = () => { if (confirm('Xoá tiến trình hiện tại và bắt đầu lại?')) { try { localStorage.removeItem(KEY) } catch {} location.reload() } };
+loop();
+</script>
+</body>
+</html>

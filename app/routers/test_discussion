@@ -1,0 +1,94 @@
+import json
+
+import pytest
+
+from app.routers.discussion import (
+    _compact_analysis,
+    _find_unverified_numbers,
+    _top_correlations,
+    _validate_analysis_result,
+)
+from tests.helpers import insert_project, insert_paper
+from app.models import DiscussionExtraction, ConclusionExtraction, HypothesisAssessmentExtraction
+from fastapi import HTTPException
+
+ANALYSIS = {
+    "dataset": {"dataset_id": "o/d", "config": "default", "split": "train", "rows_analyzed": 1200, "sampled": False},
+    "overview": {"rows_analyzed": 1200, "columns_count": 4, "duplicate_rows": 0, "missing_cells_total": 12,
+                 "missing_by_column": [{"column": "age", "missing_count": 12, "missing_percent": 1.0}]},
+    "column_summaries": {"score": {"kind": "numeric", "mean": 71.4321, "std": 9.8}},
+    "correlation_pearson": {"hours": {"hours": 1.0, "score": 0.4123}, "score": {"hours": 0.4123, "score": 1.0}},
+    "group_test": {"status": "ok", "tests": [{"name": "Welch t-test", "statistic": 3.21, "p_value": 0.0014}]},
+    "ols_regression": None,
+    "limitations": ["x"],
+}
+
+
+def test_top_correlations_dedupes_pairs():
+    pairs = _top_correlations(ANALYSIS["correlation_pearson"])
+    assert pairs == [{"var_1": "hours", "var_2": "score", "pearson_r": 0.4123}]
+
+
+def test_validate_rejects_wrong_shape():
+    with pytest.raises(HTTPException) as exc:
+        _validate_analysis_result({"foo": 1})
+    assert exc.value.status_code == 400
+    _validate_analysis_result(ANALYSIS)
+
+
+def test_unverified_numbers_flags_only_unknown_values():
+    source = json.dumps(_compact_analysis(ANALYSIS))
+    text = [
+        "Điểm trung bình là 71.43 (n = 1200), tương quan r = 0.41 [12].",   # đều khớp nguồn
+        "Kiểm định Welch cho p = 0.0014; năm 2023 có 3 nhóm.",              # khớp / bỏ qua năm & số nhỏ
+        "Hiệu ứng lên tới 0.87 và mẫu 5400 sinh viên.",                      # số bịa
+    ]
+    assert _find_unverified_numbers(text, source) == ["0.87", "5400"]
+
+
+@pytest.fixture
+def fake_llm(monkeypatch):
+    async def _fake(prompt, schema):
+        if schema is DiscussionExtraction:
+            return DiscussionExtraction(
+                key_findings_paragraph="Tương quan giữa hours và score là 0.41.",
+                literature_comparison_paragraph="Nhất quán với nghiên cứu trước [1] và dẫn nhầm [999].",
+                hypothesis_assessments=[HypothesisAssessmentExtraction(
+                    label="H1", verdict="partially_supported", explanation="Welch p = 0.0014.")],
+                implications_paragraph="Ý nghĩa.", limitations_paragraph="Hạn chế.", future_work_paragraph="Tiếp theo.",
+            )
+        return ConclusionExtraction(conclusion_paragraph="Kết luận, hiệu ứng 0.99.")
+    monkeypatch.setattr("app.routers.discussion.generate_structured", _fake)
+
+
+async def test_write_discussion_end_to_end(client, fake_llm):
+    async with __import__("app.db", fromlist=["get_pool"]).get_pool().acquire() as conn:
+        pid = await insert_project(conn)
+        paper_id = await insert_paper(conn, pid)
+        await conn.execute(
+            "INSERT INTO paper_analyses (paper_id, project_id, key_finding) VALUES ($1,$2,'f');", paper_id, pid)
+        await conn.execute(
+            "INSERT INTO themes (project_id, name, description, paper_ids) VALUES ($1,'T','d',$2::jsonb);",
+            pid, json.dumps([paper_id]))
+        gap_id = await conn.fetchval(
+            "INSERT INTO gaps (project_id, gap_type, description, proposed_research_question, confirmed) "
+            "VALUES ($1,'method','g','q',true) RETURNING id;", pid)
+        rq_id = await conn.fetchval(
+            "INSERT INTO research_questions (project_id, gap_id, rq_text, feasibility_score, feasibility_notes, "
+            "novelty_score, novelty_notes, is_quantitative, hypotheses) VALUES ($1,$2,'RQ?',4,'n',3,'n',true,$3::jsonb) RETURNING id;",
+            pid, gap_id, json.dumps([{"label": "H1", "statement": "s", "independent_variable": "hours", "dependent_variable": "score"}]))
+
+    r = await client.post(f"/write/discussion/{rq_id}", json={"analysis_result": ANALYSIS})
+    assert r.status_code == 200, r.text
+    d = r.json()["discussion"]
+    assert d["citations_used"] == [paper_id] and d["citations_invalid"] == [999]
+    assert d["numbers_unverified"] == ["0.99"]
+    assert d["hypothesis_assessments"][0]["verdict"] == "partially_supported"
+
+    listed = await client.get(f"/write/discussion/project/{pid}")
+    assert len(listed.json()) == 1
+
+
+async def test_write_discussion_requires_valid_analysis(client):
+    r = await client.post("/write/discussion/1", json={"analysis_result": {"x": 1}})
+    assert r.status_code == 400

@@ -1,26 +1,25 @@
 """
-Module Export: xuất "Research Proposal" ra PDF.
+Module Export: xuất PDF.
 
-CHỦ ĐỊNH THIẾT KẾ QUAN TRỌNG: đây là bản PDF dạng "Research Proposal" (đề xuất
-nghiên cứu), KHÔNG PHẢI "bài báo hoàn chỉnh". Lý do: Methods trong bản này là
-phương pháp DỰ KIẾN sẽ dùng (rút ra từ variables/hypotheses đã sinh), không phải
-đã chạy thật. KHÔNG có Results — vì hệ thống chưa có module Data Research (chưa
-có dataset/thí nghiệm thật). Nếu ép sinh Results lúc này sẽ là AI tự bịa số liệu —
-đúng thứ toàn bộ hệ thống được thiết kế để tránh (xem nguyên tắc ở module 9 trong
-kế hoạch gốc: "Không để LLM tự quyết định và tự chạy code").
+Hai loại tài liệu:
+  POST /export/paper/{rq_id}     — BÀI BÁO HOÀN CHỈNH theo cấu trúc IMRaD: Abstract, Introduction,
+                                   Related Work, RQ/giả thuyết, Methods, Results (kèm bảng số liệu),
+                                   Discussion, Conclusion, References. Cần đã chạy:
+                                   /write/introduction, /write/related-work, /write/discussion
+                                   (Discussion lưu kèm kết quả /data-research/analyze).
+  POST /export/proposal/{rq_id}  — (giữ nguyên) Research Proposal: chưa có Methods/Results thật.
 
-Ráp nối dữ liệu ĐÃ CÓ SẴN trong DB (không gọi LLM thêm ở bước này):
-    Research Question + Hypotheses (module RQ Generator)
-    Introduction (module Scientific Writer)
-    Related Work (module Scientific Writer)
-    Danh sách Reference (paper đã cite, lấy DOI thật từ bảng papers)
-        ↓
-    reportlab dựng PDF, dùng font NotoSans (Unicode, hỗ trợ dấu tiếng Việt)
+Nguyên tắc: bước export KHÔNG gọi LLM và không tự sinh số liệu — chỉ ráp dữ liệu đã lưu trong DB
+(văn bản đã được verify citation/số liệu ở bước viết). Citation được đánh số lại [1], [2]... theo
+thứ tự xuất hiện; citation không tồn tại bị xoá khỏi bài và ghi vào "Ghi chú dành cho tác giả".
+Font NotoSans (Unicode, hỗ trợ dấu tiếng Việt).
 """
 
+import re
 import json
 import logging
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -30,7 +29,9 @@ from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.colors import HexColor
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem, Table, TableStyle, PageBreak,
+)
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -95,6 +96,30 @@ def _build_styles() -> dict:
         "Reference": ParagraphStyle(
             "VNReference", parent=base["Normal"], fontName=_FONT_NAME,
             fontSize=9.5, leading=13, leftIndent=14, spaceAfter=4,
+        ),
+        "Abstract": ParagraphStyle(
+            "VNAbstract", parent=base["Normal"], fontName=_FONT_NAME,
+            fontSize=10, leading=14, alignment=TA_JUSTIFY, leftIndent=18, rightIndent=18, spaceAfter=6,
+        ),
+        "AbstractHead": ParagraphStyle(
+            "VNAbstractHead", parent=base["Normal"], fontName=_FONT_NAME,
+            fontSize=11, leading=14, alignment=TA_CENTER, spaceBefore=4, spaceAfter=4,
+            textColor=HexColor("#333333"),
+        ),
+        "Caption": ParagraphStyle(
+            "VNCaption", parent=base["Normal"], fontName=_FONT_NAME,
+            fontSize=9.5, leading=13, spaceBefore=6, spaceAfter=4, textColor=HexColor("#222222"),
+        ),
+        "TableHead": ParagraphStyle(
+            "VNTableHead", parent=base["Normal"], fontName=_FONT_NAME, fontSize=8.5, leading=11,
+            textColor=HexColor("#111111"),
+        ),
+        "TableCell": ParagraphStyle(
+            "VNTableCell", parent=base["Normal"], fontName=_FONT_NAME, fontSize=8.5, leading=11,
+        ),
+        "TableNote": ParagraphStyle(
+            "VNTableNote", parent=base["Normal"], fontName=_FONT_NAME, fontSize=8.5, leading=11,
+            textColor=HexColor("#555555"), spaceBefore=2,
         ),
     }
     return styles
@@ -169,7 +194,7 @@ async def _load_proposal_data(research_question_id: int) -> dict:
     }
 
 
-def _format_reference(paper: dict) -> str:
+def _format_reference(paper: dict, label=None) -> str:
     """Format kiểu APA rút gọn. authors là JSONB list tên tác giả."""
     authors = paper["authors"]
     authors = json.loads(authors) if isinstance(authors, str) else authors
@@ -187,7 +212,7 @@ def _format_reference(paper: dict) -> str:
     venue = paper["venue"] or ""
     doi_part = f" https://doi.org/{paper['doi']}" if paper["doi"] else ""
     venue_part = f" {venue}." if venue else ""
-    return f"[{paper['id']}] {author_str} ({year}). {title}.{venue_part}{doi_part}"
+    return f"[{label if label is not None else paper['id']}] {author_str} ({year}). {title}.{venue_part}{doi_part}"
 
 
 def _build_pdf(data: dict, output_path: Path) -> None:
@@ -291,6 +316,451 @@ def _build_pdf(data: dict, output_path: Path) -> None:
     doc.build(story)
 
 
+# =========================================================================== #
+# BÀI BÁO HOÀN CHỈNH (IMRaD):  Abstract → Introduction → Related Work → RQ/giả thuyết
+#   → Methods → Results → Discussion → Conclusion → References
+# Mọi nội dung lấy từ DB / kết quả đã tính; module này KHÔNG gọi LLM và không tự viết số liệu.
+# =========================================================================== #
+
+_CITE_RE = re.compile(r"\[(\d+)\]")
+_VERDICT_VI = {
+    "supported": "Được ủng hộ",
+    "partially_supported": "Được ủng hộ một phần",
+    "not_supported": "Không được ủng hộ",
+    "not_tested": "Chưa kiểm định được",
+}
+_MAX_TABLE_ROWS = 15
+
+
+def _jsonb(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _esc(text) -> str:
+    """Escape ký tự đặc biệt trước khi đưa vào reportlab Paragraph (đọc như mini-XML:
+    một dấu '<' hoặc '&' trong text LLM sẽ làm hỏng cả file PDF nếu không escape)."""
+    return escape(str(text if text is not None else ""))
+
+
+def _fmt(value, digits: int = 3) -> str:
+    if value is None:
+        return "–"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:,.{digits}f}"
+    return str(value)
+
+
+def _fmt_p(value) -> str:
+    if value is None:
+        return "–"
+    return "< 0.001" if value < 0.001 else f"{value:.3f}"
+
+
+def _p_clause(value) -> str:
+    """'p < 0.001' hoặc 'p = 0.123' (không viết 'p = < 0.001')."""
+    if value is None:
+        return "p = –"
+    return "p < 0.001" if value < 0.001 else f"p = {value:.3f}"
+
+
+def _clean_draft_text(text: str | None) -> str:
+    return (text or "").replace("`", "").strip()
+
+
+# ---- Đánh số lại citation theo thứ tự xuất hiện (chuẩn bài báo) ------------ #
+
+class _CitationNumbering:
+    """[paper_id] (id nội bộ DB) → [1], [2], ... theo thứ tự xuất hiện đầu tiên trong bài.
+    paper_id không nằm trong `valid_ids` (LLM bịa) bị XOÁ khỏi văn bản, không đưa vào bài."""
+
+    def __init__(self, valid_ids: set[int]):
+        self.valid_ids = valid_ids
+        self.mapping: dict[int, int] = {}
+        self.removed: list[int] = []
+
+    def apply(self, text: str) -> str:
+        had_removal = False
+
+        def repl(match: re.Match) -> str:
+            nonlocal had_removal
+            pid = int(match.group(1))
+            if pid not in self.valid_ids:
+                if pid not in self.removed:
+                    self.removed.append(pid)
+                had_removal = True
+                return ""
+            if pid not in self.mapping:
+                self.mapping[pid] = len(self.mapping) + 1
+            return f"[{self.mapping[pid]}]"
+
+        out = _CITE_RE.sub(repl, text or "")
+        if had_removal:
+            out = re.sub(r"\s+([.,;:])", r"\1", out)
+            out = re.sub(r"[ \t]{2,}", " ", out).strip()
+        return out
+
+
+def _strip_citations(text: str) -> str:
+    out = _CITE_RE.sub("", text or "")
+    out = re.sub(r"\s+([.,;:])", r"\1", out)
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
+def _first_sentences(text: str, max_sentences: int = 2, max_chars: int = 450) -> str:
+    parts = re.split(r"(?<=[.!?])\s+", _strip_citations(text))
+    out = " ".join(parts[:max_sentences]).strip()
+    return out if len(out) <= max_chars else out[: max_chars - 1].rstrip() + "…"
+
+
+# ---- Nạp dữ liệu ------------------------------------------------------------ #
+
+async def _load_paper_data(research_question_id: int) -> dict:
+    """Mở rộng dữ liệu proposal: thêm Discussion/Conclusion + snapshot phân tích dữ liệu,
+    keywords, và reference của MỌI phần (không chỉ Introduction/Related Work)."""
+    data = await _load_proposal_data(research_question_id)  # raise 404/400 nếu thiếu Intro/Related
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        disc_row = await conn.fetchrow(
+            "SELECT * FROM discussions WHERE research_question_id = $1 ORDER BY id DESC LIMIT 1;",
+            research_question_id,
+        )
+        if disc_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Chưa có Discussion/Conclusion cho research question này. "
+                       f"Gọi POST /write/discussion/{research_question_id} (kèm kết quả "
+                       f"/data-research/analyze) trước.",
+            )
+        project_row = await conn.fetchrow(
+            "SELECT research_plan FROM research_projects WHERE id = $1;", data["rq"]["project_id"]
+        )
+        cited = set(_jsonb(data["introduction"]["citations_used"]) or [])
+        cited |= set(_jsonb(data["related_work"]["citations_used"]) or [])
+        cited |= set(_jsonb(disc_row["citations_used"]) or [])
+        refs = []
+        if cited:
+            refs = await conn.fetch(
+                "SELECT id, title, authors, year, doi, venue FROM papers WHERE id = ANY($1::int[]) ORDER BY id;",
+                sorted(cited),
+            )
+
+    plan = _jsonb(project_row["research_plan"]) if project_row else {}
+    disc = dict(disc_row)
+    for key in ("hypothesis_assessments", "citations_used", "citations_invalid",
+                "numbers_unverified", "analysis_snapshot"):
+        disc[key] = _jsonb(disc[key])
+    data["discussion"] = disc
+    data["keywords"] = (plan or {}).get("keywords", [])[:6]
+    data["references"] = [dict(r) for r in refs]
+    return data
+
+
+# ---- Dựng nội dung bài báo (thuần Python, test được không cần DB) ------------ #
+
+def _table_block(caption: str, header: list[str], rows: list[list[str]], widths: list[float],
+                 styles: dict, note: str | None = None) -> list:
+    """Bảng có caption phía trên (chuẩn bài báo). `widths` là tỷ lệ, tự co theo bề ngang trang."""
+    usable = A4[0] - 4.4 * cm
+    total = sum(widths)
+    col_widths = [usable * w / total for w in widths]
+    data = [[Paragraph(_esc(h), styles["TableHead"]) for h in header]]
+    for row in rows:
+        data.append([Paragraph(_esc(c), styles["TableCell"]) for c in row])
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#EDEDED")),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.8, HexColor("#333333")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, HexColor("#333333")),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, HexColor("#333333")),
+        ("LINEBELOW", (0, 1), (-1, -2), 0.25, HexColor("#CCCCCC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    block = [Paragraph(_esc(caption), styles["Caption"]), table]
+    if note:
+        block.append(Paragraph(_esc(note), styles["TableNote"]))
+    block.append(Spacer(1, 10))
+    return block
+
+
+def _results_tables(snap: dict, styles: dict) -> list:
+    """Dựng các bảng Results trực tiếp từ số liệu đã tính — không qua LLM."""
+    flow: list = []
+    n_tab = 0
+
+    summaries = snap.get("column_summaries") or {}
+    numeric = [(c, s) for c, s in summaries.items() if s.get("kind") == "numeric" and s.get("n")]
+    if numeric:
+        n_tab += 1
+        rows = [[c, _fmt(s.get("n")), _fmt(s.get("mean")), _fmt(s.get("std")),
+                 _fmt(s.get("median")), _fmt(s.get("min")), _fmt(s.get("max"))]
+                for c, s in numeric[:_MAX_TABLE_ROWS]]
+        note = None
+        if len(numeric) > _MAX_TABLE_ROWS:
+            note = f"Chỉ hiển thị {_MAX_TABLE_ROWS}/{len(numeric)} biến số đầu tiên."
+        flow += _table_block(f"Bảng {n_tab}. Thống kê mô tả các biến số",
+                             ["Biến", "N", "Mean", "SD", "Median", "Min", "Max"], rows,
+                             [3, 1, 1.2, 1.2, 1.2, 1.2, 1.2], styles, note)
+
+    categorical = [(c, s) for c, s in summaries.items() if s.get("kind") == "categorical" and s.get("top_values")]
+    if categorical:
+        n_tab += 1
+        rows = []
+        for col, s in categorical[:6]:
+            for tv in s["top_values"][:3]:
+                rows.append([col, tv["value"], _fmt(tv["count"]), f"{_fmt(tv.get('percent_of_non_missing'), 1)}%"])
+        flow += _table_block(f"Bảng {n_tab}. Phân phối biến phân loại (tối đa 3 giá trị phổ biến nhất mỗi biến)",
+                             ["Biến", "Giá trị", "Tần số", "Tỷ lệ"], rows, [2.5, 3.5, 1.2, 1.2], styles)
+
+    corr = snap.get("top_correlations_pearson") or []
+    if corr:
+        n_tab += 1
+        rows = [[c["var_1"], c["var_2"], _fmt(c["pearson_r"])] for c in corr]
+        flow += _table_block(f"Bảng {n_tab}. Các cặp biến có tương quan Pearson mạnh nhất",
+                             ["Biến 1", "Biến 2", "r"], rows, [3, 3, 1.2], styles,
+                             "Tương quan không hàm ý quan hệ nhân quả.")
+
+    gt = snap.get("group_test")
+    if gt and gt.get("status") == "ok":
+        n_tab += 1
+        if gt.get("group_summary"):
+            rows = [[g["group"], _fmt(g["n"]), _fmt(g.get("mean")), _fmt(g.get("std"))] for g in gt["group_summary"]]
+            flow += _table_block(
+                f"Bảng {n_tab}. {gt.get('target_column')} theo nhóm {gt.get('group_column')}",
+                ["Nhóm", "N", "Mean", "SD"], rows, [3, 1, 1.2, 1.2], styles)
+            n_tab += 1
+        tests = gt.get("tests") or ([gt["test"]] if gt.get("test") else [])
+        if tests:
+            rows = [[t["name"], _fmt(t.get("statistic")), _fmt_p(t.get("p_value"))] for t in tests]
+            flow += _table_block(f"Bảng {n_tab}. Kết quả kiểm định giữa các nhóm",
+                                 ["Phép kiểm định", "Thống kê", "p"], rows, [4, 1.5, 1.2], styles,
+                                 "p-value chưa hiệu chỉnh cho đa kiểm định.")
+
+    ols = snap.get("ols_regression")
+    if ols and ols.get("status") == "ok":
+        n_tab += 1
+        rows = [[c["term"], _fmt(c.get("coefficient")), _fmt(c.get("std_error")), _fmt(c.get("t_statistic")),
+                 _fmt_p(c.get("p_value")), f"[{_fmt(c.get('ci_95_lower'))}; {_fmt(c.get('ci_95_upper'))}]"]
+                for c in ols.get("coefficients", [])]
+        note = (f"Biến phụ thuộc: {ols.get('target')}; N = {_fmt(ols.get('n'))}; R² = {_fmt(ols.get('r_squared'))}; "
+                f"R² hiệu chỉnh = {_fmt(ols.get('adjusted_r_squared'))}; mô hình tổng thể: {_p_clause(ols.get('model_p_value'))}.")
+        flow += _table_block(f"Bảng {n_tab}. Hồi quy tuyến tính OLS",
+                             ["Hạng tử", "B", "SE", "t", "p", "CI 95%"], rows,
+                             [2.2, 1.2, 1.2, 1.1, 1.1, 2.6], styles, note)
+    return flow
+
+
+def _build_abstract(rq: dict, snap: dict, disc: dict, conclusion_text: str, assessments: list[dict]) -> str:
+    """Abstract có cấu trúc, ráp bằng CODE từ các phần đã có (không gọi LLM)."""
+    ds = snap.get("dataset") or {}
+    parts = [f"<b>Mục tiêu.</b> {_esc(rq['rq_text'])}"]
+
+    methods = []
+    if ds.get("dataset_id"):
+        n = ds.get("rows_analyzed")
+        methods.append(f"phân tích thứ cấp trên bộ dữ liệu công khai {ds['dataset_id']}"
+                       + (f" (N = {n:,})" if isinstance(n, int) else ""))
+    gt, ols = snap.get("group_test"), snap.get("ols_regression")
+    methods.append("thống kê mô tả và tương quan Pearson")
+    if gt and gt.get("status") == "ok":
+        methods.append("kiểm định so sánh nhóm")
+    if ols and ols.get("status") == "ok":
+        methods.append("hồi quy tuyến tính OLS")
+    parts.append("<b>Phương pháp.</b> " + _esc("Nghiên cứu thực hiện " + ", ".join(methods) + "."))
+
+    if assessments:
+        verdicts = "; ".join(f"{a['label']}: {_VERDICT_VI.get(a['verdict'], a['verdict']).lower()}" for a in assessments)
+        parts.append("<b>Kết quả.</b> " + _esc(verdicts.capitalize() + ". ") + _esc(_first_sentences(disc["key_findings_paragraph"], 1)))
+    else:
+        parts.append("<b>Kết quả.</b> " + _esc(_first_sentences(disc["key_findings_paragraph"], 2)))
+    parts.append("<b>Kết luận.</b> " + _esc(_first_sentences(conclusion_text, 2, 500)))
+    return "<br/>".join(parts)
+
+
+def _prepare_paper(data: dict) -> dict:
+    """Chuẩn hoá toàn bộ nội dung bài báo: đánh số citation theo thứ tự xuất hiện, xoá citation
+    không có thật, gom ghi chú rà soát. Thuần Python — test được không cần DB."""
+    intro, related, disc = data["introduction"], data["related_work"], data["discussion"]
+    valid_ids = {p["id"] for p in data["references"]}
+    num = _CitationNumbering(valid_ids)
+    snap = disc.get("analysis_snapshot") or {}
+
+    intro_paras = [num.apply(intro[k]) for k in (
+        "background", "problem_statement", "existing_knowledge", "literature_limitation",
+        "research_gap_statement", "research_question_statement", "contribution_statement")]
+    related_themes = [(tp["theme_name"], num.apply(tp["paragraph"])) for tp in related["theme_paragraphs"]]
+    related_contra = num.apply(related["contradictions_paragraph"])
+    related_gap = num.apply(related["gap_paragraph"])
+
+    methods_text = _clean_draft_text(snap.get("methods_draft"))
+    results_paras = [p.strip() for p in _clean_draft_text(snap.get("results_draft")).split("\n\n") if p.strip()]
+    # Câu cuối của results_draft là lời nhắc nội bộ cho người dùng, không phải văn bản bài báo.
+    results_paras = [p for p in results_paras if not p.startswith("Không nên diễn giải p-value")]
+
+    d = {k: num.apply(disc[k]) for k in (
+        "key_findings_paragraph", "literature_comparison_paragraph", "implications_paragraph",
+        "limitations_paragraph", "future_work_paragraph", "conclusion_paragraph")}
+    assessments = [{**a, "explanation": num.apply(a["explanation"])} for a in disc["hypothesis_assessments"]]
+
+    ordered_refs = []
+    by_id = {p["id"]: p for p in data["references"]}
+    for pid, n in sorted(num.mapping.items(), key=lambda kv: kv[1]):
+        ordered_refs.append((n, by_id[pid]))
+
+    notes = [
+        "Bản thảo do hệ thống sinh tự động từ literature đã thu thập và kết quả phân tích dữ liệu; "
+        "tác giả cần đọc lại toàn bộ trước khi sử dụng.",
+        "Kiểm tra giấy phép sử dụng và các vấn đề đạo đức của dataset công khai đã chọn.",
+        "Các p-value là phân tích khám phá, chưa hiệu chỉnh đa kiểm định; không diễn giải là quan hệ nhân quả.",
+    ]
+    if num.removed:
+        notes.append(f"Đã tự động xoá {len(num.removed)} citation không tồn tại trong cơ sở dữ liệu bài báo "
+                     f"(id: {', '.join(map(str, num.removed))}); hãy rà soát câu liên quan.")
+    unverified = disc.get("numbers_unverified") or []
+    if unverified:
+        notes.append("Các số sau xuất hiện trong Discussion/Conclusion nhưng KHÔNG khớp số liệu phân tích — "
+                     "cần kiểm tra thủ công: " + ", ".join(unverified) + ".")
+    if not methods_text or not snap.get("column_summaries"):
+        notes.append("Discussion này được lưu từ phiên bản cũ nên thiếu bản Methods/bảng số liệu; "
+                     "hãy chạy lại POST /write/discussion để có đủ phần Methods và Results.")
+
+    return {
+        "intro": intro_paras, "related_themes": related_themes,
+        "related_contra": related_contra, "related_gap": related_gap,
+        "methods": methods_text, "results_paras": results_paras, "snap": snap,
+        "discussion": d, "assessments": assessments, "references": ordered_refs, "notes": notes,
+        "abstract": _build_abstract(data["rq"], snap, d, d["conclusion_paragraph"], assessments),
+    }
+
+
+def _page_decorations(canvas, doc) -> None:
+    canvas.saveState()
+    canvas.setFont(_FONT_NAME, 8.5)
+    canvas.setFillColor(HexColor("#777777"))
+    canvas.drawCentredString(A4[0] / 2, 1.2 * cm, f"{doc.page}")
+    canvas.restoreState()
+
+
+def _build_paper_pdf(data: dict, output_path: Path) -> None:
+    _ensure_font_registered()
+    styles = _build_styles()
+    paper = _prepare_paper(data)
+    rq, disc = data["rq"], data["discussion"]
+    snap = paper["snap"]
+
+    doc = SimpleDocTemplate(
+        str(output_path), pagesize=A4, title=rq["rq_text"][:200],
+        topMargin=2.2 * cm, bottomMargin=2.2 * cm, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+    )
+    story: list = []
+    P = lambda text, style="Body": Paragraph(_esc(text), styles[style])  # noqa: E731
+
+    # ---- Tiêu đề + Abstract + Keywords ----
+    story.append(P(rq["rq_text"], "Title"))
+    story.append(P(f"Đề tài: {data['project_topic']}", "Subtitle"))
+    story.append(Paragraph("Abstract (Tóm tắt)", styles["AbstractHead"]))
+    story.append(Paragraph(paper["abstract"], styles["Abstract"]))
+    if data.get("keywords"):
+        story.append(Paragraph("<b>Từ khoá:</b> " + _esc(", ".join(data["keywords"])), styles["Abstract"]))
+
+    # ---- 1. Introduction ----
+    story.append(P("1. Giới thiệu (Introduction)", "H1"))
+    for text in paper["intro"]:
+        story.append(P(text))
+
+    # ---- 2. Related Work ----
+    story.append(P("2. Tổng quan tài liệu (Related Work)", "H1"))
+    for name, text in paper["related_themes"]:
+        story.append(P(name, "H2"))
+        story.append(P(text))
+    story.append(P("Mâu thuẫn giữa các nghiên cứu", "H2"))
+    story.append(P(paper["related_contra"]))
+    story.append(P("Khoảng trống nghiên cứu", "H2"))
+    story.append(P(paper["related_gap"]))
+
+    # ---- 3. RQ & giả thuyết ----
+    story.append(P("3. Câu hỏi nghiên cứu và giả thuyết", "H1"))
+    story.append(Paragraph("<b>RQ:</b> " + _esc(rq["rq_text"]), styles["Body"]))
+    if rq["is_quantitative"] and rq["variables"]:
+        story.append(P("Biến số", "H2"))
+        story.append(ListFlowable(
+            [ListItem(Paragraph(f"<b>{_esc(v['name'])}</b> ({_esc(v['role'])}) — {_esc(v['description'])}", styles["Body"]))
+             for v in rq["variables"]], bulletType="bullet"))
+    if rq["is_quantitative"] and rq["hypotheses"]:
+        story.append(P("Giả thuyết", "H2"))
+        for h in rq["hypotheses"]:
+            story.append(Paragraph(f"<b>{_esc(h['label'])}:</b> {_esc(h['statement'])}", styles["Body"]))
+
+    # ---- 4. Methods ----
+    story.append(P("4. Phương pháp (Methods)", "H1"))
+    ds = snap.get("dataset") or {}
+    if paper["methods"]:
+        story.append(P("Dữ liệu và quy trình phân tích", "H2"))
+        story.append(P(paper["methods"]))
+    if ds.get("source_url"):
+        story.append(P(f"Nguồn dữ liệu: {ds['source_url']}"))
+    if ds.get("rows_in_selected_split") is not None:
+        story.append(P(f"Số dòng của split đã chọn: {ds['rows_in_selected_split']:,}; "
+                       f"số dòng được phân tích: {ds.get('rows_analyzed', 0):,}."))
+
+    # ---- 5. Results ----
+    story.append(P("5. Kết quả (Results)", "H1"))
+    for text in paper["results_paras"]:
+        story.append(P(text))
+    story.extend(_results_tables(snap, styles))
+
+    # ---- 6. Discussion ----
+    d = paper["discussion"]
+    story.append(P("6. Thảo luận (Discussion)", "H1"))
+    story.append(P("Diễn giải kết quả chính", "H2"))
+    story.append(P(d["key_findings_paragraph"]))
+    story.append(P("So sánh với các nghiên cứu trước", "H2"))
+    story.append(P(d["literature_comparison_paragraph"]))
+    if paper["assessments"]:
+        story.append(P("Đánh giá các giả thuyết", "H2"))
+        stmt = {h["label"]: h["statement"] for h in rq["hypotheses"]}
+        rows = [[a["label"], stmt.get(a["label"], ""), _VERDICT_VI.get(a["verdict"], a["verdict"]), a["explanation"]]
+                for a in paper["assessments"]]
+        story.extend(_table_block("Bảng tổng hợp đánh giá giả thuyết",
+                                  ["Giả thuyết", "Phát biểu", "Kết luận", "Giải thích"], rows, [1, 3, 1.6, 4], styles))
+    story.append(P("Ý nghĩa của nghiên cứu", "H2"))
+    story.append(P(d["implications_paragraph"]))
+    story.append(P("Hạn chế", "H2"))
+    story.append(P(d["limitations_paragraph"]))
+    tech_limits = snap.get("limitations_from_analysis") or []
+    if tech_limits:
+        story.append(ListFlowable(
+            [ListItem(Paragraph(_esc(t), styles["Body"])) for t in tech_limits], bulletType="bullet"))
+    story.append(P("Hướng nghiên cứu tiếp theo", "H2"))
+    story.append(P(d["future_work_paragraph"]))
+
+    # ---- 7. Conclusion ----
+    story.append(P("7. Kết luận (Conclusion)", "H1"))
+    story.append(P(d["conclusion_paragraph"]))
+
+    # ---- References (đánh số theo thứ tự xuất hiện) ----
+    story.append(P("Tài liệu tham khảo (References)", "H1"))
+    if paper["references"]:
+        for n, ref in paper["references"]:
+            story.append(P(_format_reference(ref, label=n), "Reference"))
+    else:
+        story.append(P("(Bài không có citation hợp lệ.)"))
+
+    # ---- Ghi chú dành cho tác giả (trang cuối) ----
+    story.append(PageBreak())
+    story.append(P("Ghi chú dành cho tác giả (xoá trang này trước khi nộp)", "H1"))
+    story.append(ListFlowable(
+        [ListItem(Paragraph(_esc(n), styles["Body"])) for n in paper["notes"]], bulletType="bullet"))
+
+    doc.build(story, onFirstPage=_page_decorations, onLaterPages=_page_decorations)
+
+
 @router.post("/proposal/{research_question_id}")
 async def export_proposal_pdf(research_question_id: int):
     """Xuất PDF Research Proposal cho 1 research question đã có đủ Introduction + Related Work."""
@@ -312,4 +782,29 @@ async def export_proposal_pdf(research_question_id: int):
         path=str(output_path),
         media_type="application/pdf",
         filename=f"research_proposal_rq_{research_question_id}.pdf",
+    )
+
+
+@router.post("/paper/{research_question_id}")
+async def export_paper_pdf(research_question_id: int):
+    """Xuất bài báo hoàn chỉnh (IMRaD) cho 1 research question đã có Introduction, Related Work
+    và Discussion/Conclusion (kèm kết quả phân tích dữ liệu)."""
+    data = await _load_paper_data(research_question_id)
+
+    output_dir = Path("/tmp/research_copilot_exports")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"paper_rq_{research_question_id}.pdf"
+
+    try:
+        _build_paper_pdf(data, output_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Lỗi khi build PDF bài báo: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Lỗi khi tạo PDF: {exc}")
+
+    return FileResponse(
+        path=str(output_path),
+        media_type="application/pdf",
+        filename=f"research_paper_rq_{research_question_id}.pdf",
     )

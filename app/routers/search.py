@@ -3,11 +3,12 @@ Module 3 trong kế hoạch: Literature Search.
 
 Luồng:
     Research Plan (đã lưu ở /plan)
-        ↓ Query Generator
-    OpenAlex API
-        ↓ Parse metadata
-    Deduplication (theo DOI, trong phạm vi 1 project)
-        ↓
+        ↓ Query Generator (topic AND khu vực)
+    OpenAlex + Semantic Scholar, cửa sổ thời gian tính từ HÔM NAY (mới nhất)
+        ↓ Dedup (DOI/tiêu đề)
+        ↓ Lọc đúng khu vực (title/abstract phải nhắc khu vực của đề tài)
+        ↓ Xếp theo ngày xuất bản mới nhất, cắt đúng target_paper_count
+        ↓ Nếu còn thiếu: mở rộng cửa sổ 3 → 5 → 10 năm rồi lặp lại
     Lưu bảng `papers`
 
 Không để LLM tự nhớ paper — toàn bộ metadata lấy trực tiếp từ OpenAlex.
@@ -16,6 +17,7 @@ Không để LLM tự nhớ paper — toàn bộ metadata lấy trực tiếp t�
 import os
 import json
 import logging
+from datetime import date
 
 from fastapi import APIRouter, HTTPException
 
@@ -25,6 +27,7 @@ from app.services.query_builder import build_query_from_plan
 from app.services.openalex_client import search_openalex
 from app.services.semantic_scholar_client import search_semantic_scholar
 from app.services.paper_merge import merge_papers
+from app.services.recency_region import region_terms, window_steps, filter_and_rank
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/search", tags=["literature-search"])
@@ -57,8 +60,8 @@ async def _save_papers(papers: list[Paper]) -> int:
                 row = await conn.fetchrow(
                     """
                     INSERT INTO papers
-                        (project_id, title, authors, year, doi, abstract, venue, url, source, citation_count, pdf_url)
-                    VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11)
+                        (project_id, title, authors, year, doi, abstract, venue, url, source, citation_count, pdf_url, publication_date)
+                    VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (project_id, doi) WHERE doi IS NOT NULL DO UPDATE SET
                         pdf_url  = COALESCE(papers.pdf_url, EXCLUDED.pdf_url),
                         abstract = COALESCE(NULLIF(papers.abstract, ''), EXCLUDED.abstract)
@@ -75,58 +78,84 @@ async def _save_papers(papers: list[Paper]) -> int:
                     paper.source,
                     paper.citation_count,
                     paper.pdf_url,
+                    paper.publication_date,
                 )
                 if row is not None and row["inserted"]:
                     saved_count += 1
     return saved_count
 
 
-@router.post("/{project_id}", response_model=SearchResponse)
-async def run_search(project_id: int) -> SearchResponse:
-    """Chạy Literature Search cho 1 research project đã có plan."""
-    plan = await _load_plan(project_id)
-    query = build_query_from_plan(plan)
+async def _search_once(plan: ResearchPlan, project_id: int, query: str, start_year: int, today: date) -> list[Paper]:
+    """Gọi các nguồn trong cửa sổ [start_year, hôm nay], lấy dư (x3) để còn lọc khu vực."""
+    target = plan.search_strategy.target_paper_count
+    pool_size = min(target * 3, 200)
 
-    try:
-        papers = await search_openalex(
-            query=query,
-            project_id=project_id,
-            date_range=plan.search_strategy.date_range,
-            per_page=plan.search_strategy.target_paper_count,
-        )
-    except Exception:
-        raise HTTPException(status_code=502, detail="Không gọi được OpenAlex API.")
+    papers = await search_openalex(
+        query=query,
+        project_id=project_id,
+        date_range=plan.search_strategy.date_range,
+        per_page=pool_size,
+        from_date=f"{start_year}-01-01",
+        to_date=today.isoformat(),   # không lấy bài ghi ngày tương lai
+    )
 
     # Nguồn thứ 2 (Semantic Scholar): lỗi/rate-limit thì bỏ qua, OpenAlex vẫn đủ dùng.
     # Tắt bằng ENABLE_SEMANTIC_SCHOLAR=0.
     if os.environ.get("ENABLE_SEMANTIC_SCHOLAR", "1") != "0":
-        s2_query = " ".join(plan.keywords[:4]) or plan.topic
+        s2_query = " ".join([*plan.keywords[:4], *region_terms(plan)[:2]]) or plan.topic
         extra = await search_semantic_scholar(
             query=s2_query,
             project_id=project_id,
             date_range=plan.search_strategy.date_range,
-            limit=plan.search_strategy.target_paper_count,
+            limit=min(pool_size, 100),
+            start_year=start_year,
+            end_year=today.year,
         )
         papers = merge_papers(papers, extra)
+    return papers
 
-    saved = await _save_papers(papers)
+
+@router.post("/{project_id}", response_model=SearchResponse)
+async def run_search(project_id: int) -> SearchResponse:
+    """Chạy Literature Search cho 1 research project đã có plan.
+
+    - Chỉ lấy bài mới nhất: cửa sổ thời gian tính từ hôm nay, kết quả xếp theo ngày xuất bản giảm dần.
+    - Nếu đề tài chỉ định quốc gia/khu vực: chỉ giữ paper thực sự nhắc tới khu vực đó."""
+    plan = await _load_plan(project_id)
+    query = build_query_from_plan(plan)
+    target = plan.search_strategy.target_paper_count
+    today = date.today()
+
+    selected: list[Paper] = []
+    for start_year in window_steps(plan.search_strategy.date_range, today):
+        try:
+            raw = await _search_once(plan, project_id, query, start_year, today)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Không gọi được OpenAlex API.")
+        selected = filter_and_rank(raw, plan, start_year, target)
+        logger.info("Search %s..nay: %d thô -> %d đạt (cần %d)", start_year, len(raw), len(selected), target)
+        if len(selected) >= target:
+            break   # đủ số lượng ở cửa sổ mới nhất, không cần lùi xa hơn
+
+    saved = await _save_papers(selected)
 
     return SearchResponse(
         project_id=project_id,
         query_used=query,
-        found=len(papers),
+        found=len(selected),
         saved=saved,
-        papers=papers,
+        papers=selected,
     )
 
 
 @router.get("/{project_id}", response_model=list[Paper])
 async def list_papers(project_id: int) -> list[Paper]:
-    """Lấy toàn bộ paper đã lưu cho 1 project."""
+    """Lấy toàn bộ paper đã lưu cho 1 project (mới nhất trước)."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM papers WHERE project_id = $1 ORDER BY citation_count DESC;",
+            "SELECT * FROM papers WHERE project_id = $1 "
+            "ORDER BY publication_date DESC NULLS LAST, year DESC NULLS LAST, citation_count DESC;",
             project_id,
         )
     return [
@@ -136,6 +165,7 @@ async def list_papers(project_id: int) -> list[Paper]:
             title=r["title"],
             authors=json.loads(r["authors"]) if isinstance(r["authors"], str) else r["authors"],
             year=r["year"],
+            publication_date=r["publication_date"],
             doi=r["doi"],
             abstract=r["abstract"],
             venue=r["venue"],

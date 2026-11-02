@@ -203,6 +203,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         # ---- Paper Reader (full-text) ----
         # pdf_url: link PDF open-access (OpenAlex/Semantic Scholar). ALTER idempotent nên DB cũ vẫn chạy.
         await conn.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS pdf_url TEXT;")
+        await conn.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS publication_date TEXT;")
 
         # paper_chunks: full-text chia đoạn. Cột embedding dùng pgvector; nếu DB không có
         # extension `vector` (image postgres thường) thì vẫn tạo bảng nhưng KHÔNG có cột embedding,

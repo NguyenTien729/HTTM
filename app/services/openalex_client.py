@@ -66,6 +66,7 @@ def _parse_work(raw: dict, project_id: int) -> Paper:
         title=raw.get("title") or "(không có tiêu đề)",
         authors=authors,
         year=raw.get("publication_year"),
+        publication_date=raw.get("publication_date"),
         doi=doi,
         abstract=_reconstruct_abstract(raw.get("abstract_inverted_index")),
         venue=source_info.get("display_name"),
@@ -81,6 +82,8 @@ async def search_openalex(
     project_id: int,
     date_range: Optional[str] = None,
     per_page: int = 50,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> list[Paper]:
     """Gọi OpenAlex /works, trả về list Paper đã parse (chưa dedup, chưa lưu DB)."""
     params = {
@@ -88,7 +91,8 @@ async def search_openalex(
         "per-page": min(max(per_page, 1), 200),  # OpenAlex giới hạn tối đa 200/trang
     }
 
-    from_date, to_date = _parse_date_range(date_range or "")
+    if not (from_date and to_date):
+        from_date, to_date = _parse_date_range(date_range or "")
     if from_date and to_date:
         params["filter"] = f"from_publication_date:{from_date},to_publication_date:{to_date}"
 

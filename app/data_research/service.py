@@ -160,22 +160,42 @@ def _to_candidate(item: dict[str, Any], terms: list[str]) -> dict[str, Any]:
 
 
 async def discover_datasets(topic: str, limit: int = 10) -> dict[str, Any]:
+    """Discover datasets using progressive keyword fallback for Vietnamese topics."""
     topic = (topic or "").strip()
     if len(topic) < 3:
         raise DataResearchError("Hãy nhập chủ đề nghiên cứu cụ thể (ít nhất 3 ký tự).", 422)
     limit = max(1, min(int(limit), 20))
     terms = _topic_terms(topic)
-    variants = [topic]
-    if len(terms) >= 2:
-        shorter = " ".join(terms[:5])
-        if _normalized_text(shorter) != _normalized_text(topic):
-            variants.append(shorter)
+    normalized = _normalized_text(topic)
+    translations = {
+        "tri tue nhan tao": "artificial intelligence",
+        "sinh vien": "students", "giao duc": "education",
+        "hoc tap": "learning", "nang suat": "productivity",
+        "suc khoe": "health", "tam ly": "psychology",
+        "cam xuc": "sentiment", "kinh te": "economics",
+        "tai chinh": "finance", "moi truong": "environment",
+        "bien doi khi hau": "climate", "y te": "medical",
+        "viec lam": "employment", "thu nhap": "income",
+        "mang xa hoi": "social media", "ngon ngu": "language",
+    }
+    english = [v for k, v in translations.items() if k in normalized]
+    queries = [topic]
+    if english:
+        queries += [" ".join(english[:3]), *english]
+    if terms:
+        queries += [" ".join(terms[:3]), *terms[:5]]
+    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))[:12]
 
-    headers = {"User-Agent": USER_AGENT}
     found: dict[str, dict[str, Any]] = {}
+    errors = []
+    headers = {"User-Agent": USER_AGENT}
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers) as client:
-        for query in variants:
-            result = await _get_json(client, HUB_API, {"search": query, "limit": min(50, limit * 3), "sort": "downloads", "direction": "-1"})
+        for query in queries:
+            try:
+                result = await _get_json(client, HUB_API, {"search": query, "limit": min(50, limit * 3)})
+            except DataResearchError as exc:
+                errors.append(exc)
+                continue
             if not isinstance(result, list):
                 continue
             for item in result:
@@ -185,20 +205,28 @@ async def discover_datasets(topic: str, limit: int = 10) -> dict[str, Any]:
                 if not _DATASET_ID_RE.fullmatch(dataset_id):
                     continue
                 candidate = _to_candidate(item, terms)
-                if dataset_id not in found or candidate["topic_match_score"] > found[dataset_id]["topic_match_score"]:
-                    found[dataset_id] = candidate
+                # Include matches from translated search keywords in the score.
+                english_terms = _topic_terms(" ".join(english))
+                if english_terms:
+                    search_text = _normalized_text(" ".join([
+                        dataset_id, candidate["description"], " ".join(candidate["tags"])
+                    ]))
+                    translated_score = sum(t in search_text for t in english_terms) / len(english_terms)
+                    candidate["topic_match_score"] = round(max(candidate["topic_match_score"], translated_score), 3)
+                found[dataset_id] = candidate
+            if len(found) >= limit:
+                break
 
-    candidates = sorted(
-        found.values(),
-        key=lambda item: (item["topic_match_score"], item["downloads"], item["likes"]),
-        reverse=True,
-    )[:limit]
+    if not found and errors:
+        raise errors[0]
+    candidates = sorted(found.values(), key=lambda x: (
+        x["topic_match_score"], x["downloads"], x["likes"]), reverse=True)[:limit]
     return {
         "topic": topic,
         "source": "Hugging Face Hub API",
         "count": len(candidates),
         "datasets": candidates,
-        "review_note": "Đây là danh sách gợi ý tự động, không phải xác nhận dataset phù hợp. Hãy kiểm tra mô tả, giấy phép, biến và phạm vi mẫu trước khi chọn.",
+        "review_note": "Kết quả tìm theo từ khóa, cần kiểm tra dataset và giấy phép trước khi sử dụng.",
     }
 
 

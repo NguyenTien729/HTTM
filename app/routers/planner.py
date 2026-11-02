@@ -30,11 +30,16 @@ async def generate_research_plan(payload: ResearchPlanRequest) -> ResearchPlan:
         f"Ngôn ngữ mong muốn cho tài liệu: {payload.language}\n"
         f"Loại nghiên cứu mong muốn: {payload.study_type or 'không chỉ định'}\n"
         f"Số lượng paper mục tiêu: {payload.target_paper_count}\n"
-        f"Journal/conference mục tiêu: {payload.target_venue or 'không chỉ định'}\n\n"
+        f"Journal/conference mục tiêu: {payload.target_venue or 'không chỉ định'}\n"
+        f"Quốc gia/khu vực bắt buộc: {payload.region or 'không chỉ định (suy ra từ topic nếu có)'}\n\n"
         "Hãy phân tích chủ đề này thành một research plan có cấu trúc: "
         "xác định lĩnh vực nghiên cứu, từ khoá tìm kiếm học thuật (tiếng Anh), "
         "từ đồng nghĩa cho mỗi từ khoá, các câu hỏi nghiên cứu khả thi, "
-        "và chiến lược tìm kiếm (nguồn dữ liệu, khoảng thời gian, loại nghiên cứu)."
+        "và chiến lược tìm kiếm (nguồn dữ liệu, khoảng thời gian, loại nghiên cứu). "
+        "Nếu topic hoặc trường region nêu quốc gia/khu vực, hãy điền region bằng tên tiếng Anh, "
+        "region_terms bằng tên nước, biến thể tên, tính từ quốc tịch và thành phố/vùng liên quan, "
+        "country_codes bằng mã ISO alpha-2. Nếu không có giới hạn khu vực thì để region=null, "
+        "region_terms=[], country_codes=[]."
     )
     return await generate_structured(prompt, ResearchPlan)
 

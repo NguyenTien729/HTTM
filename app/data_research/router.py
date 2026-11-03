@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from .planner_integration import resolve_project_topic
 from .service import (
     DataResearchError,
     analyze_dataframe,
@@ -19,18 +20,26 @@ router = APIRouter(prefix="/data-research", tags=["Data Research"])
 
 
 class DiscoverRequest(BaseModel):
-    topic: str = Field(..., min_length=3, max_length=300, description="Chủ đề nghiên cứu cần tìm dataset")
+    # Required workflow: discover is always tied to a Research Planner project.
+    project_id: str | int = Field(..., description="ID project trong Research Planner; topic được lấy tự động")
     limit: int = Field(default=10, ge=1, le=20)
+
+    # Reject the old manual-topic request instead of silently ignoring it.
+    model_config = ConfigDict(extra="forbid")
 
 
 class InspectRequest(BaseModel):
     dataset_id: str = Field(..., min_length=3, max_length=200)
+    # Optional: carry the active Planner project through the workflow without retyping its topic.
+    project_id: str | int | None = Field(default=None, description="Tùy chọn; topic được tự lấy từ Research Planner và gắn vào context")
     config: str | None = Field(default=None, max_length=200)
     split: str | None = Field(default=None, max_length=100)
 
 
 class AnalyzeRequest(BaseModel):
     dataset_id: str = Field(..., min_length=3, max_length=200)
+    # If supplied, the topic is automatically loaded from the Planner and injected into Methods/Results metadata.
+    project_id: str | int | None = Field(default=None, description="Tùy chọn; tự lấy topic để gắn vào bản nháp Methods/Results")
     config: str = Field(..., min_length=1, max_length=200)
     split: str = Field(..., min_length=1, max_length=100)
     # This explicit confirmation is the human-in-the-loop gate after inspect.
@@ -45,11 +54,29 @@ def _raise_api_error(exc: DataResearchError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
-@router.post("/discover", summary="Tự tìm dataset công khai theo chủ đề nghiên cứu")
-async def discover(request: DiscoverRequest) -> dict[str, Any]:
-    """Search Hugging Face Hub and return candidate datasets for a human to review."""
+@router.get("/project-topic/{project_id}", summary="Lấy topic nghiên cứu từ Research Planner theo project_id")
+async def get_project_topic(project_id: str) -> dict[str, str]:
+    """Allow clients to verify the project/topic mapping before discovering datasets."""
     try:
-        return await discover_datasets(topic=request.topic, limit=request.limit)
+        return await resolve_project_topic(project_id)
+    except DataResearchError as exc:
+        _raise_api_error(exc)
+
+
+@router.post("/discover", summary="Tự tìm dataset theo topic của Research Planner")
+async def discover(request: DiscoverRequest) -> dict[str, Any]:
+    """Always resolve the topic from Research Planner before searching.
+
+    Manual topic input is deliberately unsupported so results cannot drift away
+    from the active project selected in the Planner.
+    """
+    try:
+        project_context = await resolve_project_topic(request.project_id)
+        topic = project_context["topic"]
+        result = await discover_datasets(topic=topic, limit=request.limit)
+        result["topic_source"] = "research_planner"
+        result["project"] = project_context
+        return result
     except DataResearchError as exc:
         _raise_api_error(exc)
 
@@ -58,11 +85,14 @@ async def discover(request: DiscoverRequest) -> dict[str, Any]:
 async def inspect(request: InspectRequest) -> dict[str, Any]:
     """Return metadata and a sample so the user can decide whether to approve it."""
     try:
-        return await inspect_dataset(
+        result = await inspect_dataset(
             dataset_id=request.dataset_id,
             config=request.config,
             split=request.split,
         )
+        if request.project_id is not None:
+            result["project"] = await resolve_project_topic(request.project_id)
+        return result
     except DataResearchError as exc:
         _raise_api_error(exc)
 
@@ -82,6 +112,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             split=request.split,
             max_rows=request.max_rows,
         )
+        if request.project_id is not None:
+            project_context = await resolve_project_topic(request.project_id)
+            metadata["project_id"] = project_context["project_id"]
+            metadata["research_topic"] = project_context["topic"]
+            metadata["topic_source"] = project_context["topic_source"]
+            metadata["project_title"] = project_context.get("project_title", "")
         return analyze_dataframe(
             frame=frame,
             dataset_meta=metadata,

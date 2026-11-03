@@ -7,11 +7,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from .planner_integration import resolve_project_topic
+from .planner_integration import resolve_project_topic, resolve_selected_gap
 from .service import (
     DataResearchError,
     analyze_dataframe,
-    discover_datasets,
+    discover_gap_datasets,
     download_dataset_dataframe,
     inspect_dataset,
 )
@@ -20,11 +20,19 @@ router = APIRouter(prefix="/data-research", tags=["Data Research"])
 
 
 class DiscoverRequest(BaseModel):
-    # Required workflow: discover is always tied to a Research Planner project.
-    project_id: str | int = Field(..., description="ID project trong Research Planner; topic được lấy tự động")
-    limit: int = Field(default=10, ge=1, le=20)
+    """Search datasets for one explicitly selected Research Gap."""
 
-    # Reject the old manual-topic request instead of silently ignoring it.
+    project_id: str | int = Field(..., description="Project chứa research gap được chọn")
+    gap_id: str | int = Field(..., description="ID của research gap người dùng đã chọn")
+    limit: int = Field(default=10, ge=1, le=20, description="Số dataset phù hợp cần tìm")
+    max_search_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=180,
+        description="Tổng thời gian tối đa cho mở rộng từ khóa và tìm kiếm (5-180 giây)",
+    )
+
+    # Reject old topic-only requests: a gap_id is required by design.
     model_config = ConfigDict(extra="forbid")
 
 
@@ -63,19 +71,20 @@ async def get_project_topic(project_id: str) -> dict[str, str]:
         _raise_api_error(exc)
 
 
-@router.post("/discover", summary="Tự tìm dataset theo topic của Research Planner")
+@router.post("/discover", summary="Tìm dataset gần nghĩa theo research gap đã chọn")
 async def discover(request: DiscoverRequest) -> dict[str, Any]:
-    """Always resolve the topic from Research Planner before searching.
+    """Search using the selected gap, stopping at the requested count or deadline.
 
-    Manual topic input is deliberately unsupported so results cannot drift away
-    from the active project selected in the Planner.
+    The project's broad topic is intentionally not passed into dataset discovery.
     """
     try:
-        project_context = await resolve_project_topic(request.project_id)
-        topic = project_context["topic"]
-        result = await discover_datasets(topic=topic, limit=request.limit)
-        result["topic_source"] = "research_planner"
-        result["project"] = project_context
+        selected_gap = await resolve_selected_gap(request.project_id, request.gap_id)
+        result = await discover_gap_datasets(
+            gap=selected_gap,
+            limit=request.limit,
+            max_search_seconds=request.max_search_seconds,
+        )
+        result["project_id"] = selected_gap["project_id"]
         return result
     except DataResearchError as exc:
         _raise_api_error(exc)

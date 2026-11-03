@@ -361,3 +361,56 @@ async def resolve_project_topic(project_id: str | int) -> dict[str, str]:
         "topic_source": "research_projects.topic",
         "project_title": project_title,
     }
+
+async def resolve_selected_gap(project_id: str | int, gap_id: str | int) -> dict[str, Any]:
+    """Load exactly the user-selected gap and verify it belongs to the project.
+
+    Deliberately does not load or return the project's broad topic: Data Research
+    must derive its search input from this selected gap only.
+    """
+    try:
+        numeric_project_id = int(str(project_id).strip())
+        numeric_gap_id = int(str(gap_id).strip())
+    except (TypeError, ValueError) as exc:
+        raise DataResearchError("project_id và gap_id phải là số nguyên hợp lệ.", 422) from exc
+    if numeric_project_id <= 0 or numeric_gap_id <= 0:
+        raise DataResearchError("project_id và gap_id phải lớn hơn 0.", 422)
+
+    try:
+        from app.db import get_pool
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, project_id, gap_type, description,
+                       proposed_research_question, confirmed
+                FROM gaps
+                WHERE id = $1 AND project_id = $2;
+                """,
+                numeric_gap_id,
+                numeric_project_id,
+            )
+    except Exception as exc:
+        raise DataResearchError(
+            "Không thể đọc research gap từ PostgreSQL. Hãy kiểm tra database connection và schema.",
+            500,
+        ) from exc
+
+    if row is None:
+        raise DataResearchError(
+            f"Không tìm thấy research gap id={numeric_gap_id} thuộc project id={numeric_project_id}.",
+            404,
+        )
+
+    description = str(row["description"] or "").strip()
+    if len(description) < 3:
+        raise DataResearchError("Research gap được chọn không có mô tả hợp lệ.", 422)
+
+    return {
+        "gap_id": int(row["id"]),
+        "project_id": int(row["project_id"]),
+        "gap_type": str(row["gap_type"] or "").strip(),
+        "description": description,
+        "proposed_research_question": str(row["proposed_research_question"] or "").strip(),
+        "confirmed": bool(row["confirmed"]),
+    }

@@ -7,13 +7,17 @@ accepted, which keeps this service from becoming an arbitrary URL fetcher.
 
 from __future__ import annotations
 
+import asyncio
 import io
+import logging
 import math
 import random
 import re
 import unicodedata
 from collections import Counter
 from typing import Any
+
+from pydantic import BaseModel, Field
 from urllib.parse import urlparse
 
 import httpx
@@ -25,6 +29,9 @@ HUB_API = "https://huggingface.co/api/datasets"
 VIEWER_API = "https://datasets-server.huggingface.co"
 USER_AGENT = "HTTM-DataResearch/1.0 (academic research prototype)"
 REQUEST_TIMEOUT = 25.0
+QUERY_EXPANSION_TIMEOUT = 10.0
+MAX_HUB_QUERY_RESULTS = 100
+logger = logging.getLogger(__name__)
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 MAX_SINGLE_FILE_BYTES = 32 * 1024 * 1024
 MAX_PARQUET_FILES = 40
@@ -60,10 +67,15 @@ def _normalized_text(value: Any) -> str:
 
 
 def _topic_terms(topic: str) -> list[str]:
+    """Return useful English/Vietnamese tokens for lightweight metadata scoring."""
     stop_words = {
         "the", "and", "for", "with", "from", "into", "about", "data", "dataset",
-        "study", "research", "of", "to", "in", "on", "a", "an", "va", "cua",
-        "cho", "trong", "nhung", "mot", "cac", "ve", "tai", "anh", "huong",
+        "datasets", "study", "studies", "research", "of", "to", "in", "on", "a", "an",
+        "by", "as", "at", "is", "are", "be", "been", "being", "that", "this", "these",
+        "those", "which", "using", "use", "used", "based", "among", "between", "across",
+        "impact", "effect", "effects", "analysis", "exploring", "investigating", "examining",
+        "va", "cua", "cho", "trong", "nhung", "mot", "cac", "ve", "tai", "anh", "huong",
+        "nghien", "cuu", "doi", "voi", "duoc", "su", "dung", "cac", "nhom", "doi", "tuong",
     }
     return [t for t in _normalized_text(topic).split() if len(t) > 1 and t not in stop_words]
 
@@ -107,9 +119,17 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-async def _get_json(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> dict[str, Any] | list[Any]:
+async def _get_json(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    request_timeout: float | None = None,
+) -> dict[str, Any] | list[Any]:
     try:
-        response = await client.get(url, params=params)
+        if request_timeout is None:
+            response = await client.get(url, params=params)
+        else:
+            response = await client.get(url, params=params, timeout=request_timeout)
     except httpx.TimeoutException as exc:
         raise DataResearchError("Nguồn dữ liệu phản hồi quá chậm. Hãy thử lại sau.", 504) from exc
     except httpx.HTTPError as exc:
@@ -128,7 +148,100 @@ async def _get_json(client: httpx.AsyncClient, url: str, params: dict[str, Any])
         raise DataResearchError("Nguồn dữ liệu trả về JSON không hợp lệ.", 502) from exc
 
 
-def _to_candidate(item: dict[str, Any], terms: list[str]) -> dict[str, Any]:
+class DatasetSearchQueryExpansion(BaseModel):
+    """Semantic paraphrases used as separate Hugging Face text searches."""
+
+    queries: list[str] = Field(default_factory=list, max_length=12)
+
+
+def _gap_seed_queries(gap: dict[str, Any]) -> list[str]:
+    """Create deterministic fallback queries using only the selected gap."""
+    description = str(gap.get("description") or "").strip()
+    question = str(gap.get("proposed_research_question") or "").strip()
+    queries: list[str] = []
+
+    for value in (description, question):
+        # Keep one original-language phrase (including Vietnamese accents) for
+        # sources whose index contains non-English dataset cards.
+        if len(value) >= 3:
+            queries.append(value[:120])
+        terms = _topic_terms(value)
+        if len(terms) >= 2:
+            queries.append(" ".join(terms[:6]))
+            # Preserve different parts of a long gap statement as separate searches.
+            for start in range(0, max(0, len(terms) - 1), 3):
+                phrase = terms[start:start + 4]
+                if len(phrase) >= 2:
+                    queries.append(" ".join(phrase))
+
+    # Common domain-language alternatives help even when the LLM key is absent.
+    normalized = _normalized_text(f"{description} {question}")
+    synonym_pairs = (
+        ("sms", "text message"),
+        ("text message", "mobile messaging"),
+        ("spam", "junk message"),
+        ("misinformation", "fake news"),
+        ("fake news", "misinformation detection"),
+        ("student performance", "academic achievement"),
+        ("academic performance", "learning outcomes"),
+        ("university students", "higher education learners"),
+        ("elderly", "older adults"),
+        ("rural", "remote communities"),
+        ("financial literacy", "financial education"),
+        ("sentiment analysis", "opinion mining"),
+        ("cyberbullying", "online harassment"),
+        ("fraud detection", "anomaly detection"),
+        ("mental health", "psychological wellbeing"),
+    )
+    for source, alternative in synonym_pairs:
+        if _normalized_text(source) in normalized:
+            queries.append(alternative)
+
+    return _dedupe_queries(queries)
+
+
+def _dedupe_queries(queries: list[str], excluded: set[str] | None = None) -> list[str]:
+    seen = set(excluded or set())
+    result: list[str] = []
+    for raw in queries:
+        query = re.sub(r"\s+", " ", str(raw or "")).strip(" \t\r\n-;,.:")
+        normalized = _normalized_text(query)
+        if len(normalized) < 3 or len(normalized.split()) < 2 or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(query[:120])
+    return result
+
+
+async def _expand_gap_queries(
+    gap: dict[str, Any],
+    excluded_queries: list[str],
+    round_number: int,
+) -> list[str]:
+    """Ask the configured LLM for near-synonym searches; caller enforces timeout."""
+    from app.services.llm import generate_structured
+
+    prompt = (
+        "Bạn là chuyên gia tìm kiếm DATASET. Chỉ được dựa vào research gap được chọn dưới đây; "
+        "KHÔNG mở rộng sang toàn bộ đề tài nghiên cứu và KHÔNG tự thêm chủ đề không có căn cứ.\n\n"
+        f"Loại gap: {gap.get('gap_type', '')}\n"
+        f"Mô tả gap đã chọn: {gap.get('description', '')}\n"
+        f"Câu hỏi nghiên cứu gắn với gap: {gap.get('proposed_research_question', '')}\n\n"
+        "Hãy tạo tối đa 10 truy vấn tìm dataset trên Hugging Face. Tìm các dataset gần nghĩa chứ "
+        "không chỉ lặp lại nguyên văn: dùng từ đồng nghĩa, cách diễn đạt tương đương, thuật ngữ "
+        "chuyên ngành, tên tác vụ/nhãn dữ liệu, cách gọi khác của nhóm đối tượng hoặc biến nghiên cứu. "
+        "Ưu tiên truy vấn tiếng Anh ngắn 2-6 từ vì metadata dataset thường viết bằng tiếng Anh. "
+        "Mỗi truy vấn phải có khả năng tìm ra dataset phục vụ trực tiếp cho gap này; không dùng "
+        "tên đề tài tổng quát.\n"
+        f"Đây là vòng mở rộng số {round_number}; không lặp lại các truy vấn đã dùng: "
+        f"{json.dumps(excluded_queries, ensure_ascii=False)}\n"
+        "Trả về JSON có field queries là danh sách chuỗi ngắn, không giải thích."
+    )
+    result = await generate_structured(prompt, DatasetSearchQueryExpansion)
+    return result.queries
+
+
+def _to_candidate(item: dict[str, Any], queries: list[str]) -> dict[str, Any]:
     card = item.get("cardData") or {}
     dataset_id = str(item.get("id") or "")
     description = card.get("short_description") or card.get("description") or ""
@@ -140,8 +253,22 @@ def _to_candidate(item: dict[str, Any], terms: list[str]) -> dict[str, Any]:
         " ".join(card.get("task_categories") or []),
         " ".join(card.get("task_ids") or []),
     ]))
-    matched = [term for term in terms if term in search_text]
-    score = round(len(matched) / max(1, len(terms)), 3)
+    search_terms = set(search_text.split())
+
+    query_matches: list[tuple[str, float, list[str]]] = []
+    for query in queries:
+        terms = _topic_terms(query)
+        if not terms:
+            continue
+        matched = [term for term in terms if term in search_terms]
+        score = len(matched) / max(1, len(set(terms)))
+        if score > 0:
+            query_matches.append((query, score, matched))
+
+    query_matches.sort(key=lambda value: value[1], reverse=True)
+    best_score = query_matches[0][1] if query_matches else 0.0
+    matched_terms = list(dict.fromkeys(term for _, _, terms in query_matches for term in terms))
+    matched_queries = [query for query, _, _ in query_matches]
     return {
         "dataset_id": dataset_id,
         "title": dataset_id.split("/", 1)[-1].replace("-", " ").replace("_", " "),
@@ -152,50 +279,141 @@ def _to_candidate(item: dict[str, Any], terms: list[str]) -> dict[str, Any]:
         "license": card.get("license"),
         "task_categories": (card.get("task_categories") or [])[:10],
         "tags": (item.get("tags") or [])[:15],
-        "topic_match_score": score,
-        "matched_terms": matched,
+        "gap_match_score": round(best_score, 3),
+        "matched_terms": matched_terms,
+        "matched_queries": matched_queries[:8],
         "dataset_url": f"https://huggingface.co/datasets/{dataset_id}",
         "source": "Hugging Face Hub",
     }
 
 
-async def discover_datasets(topic: str, limit: int = 10) -> dict[str, Any]:
-    """Discover datasets using progressive keyword fallback for Vietnamese topics."""
-    topic = (topic or "").strip()
-    if len(topic) < 3:
-        raise DataResearchError("Hãy nhập chủ đề nghiên cứu cụ thể (ít nhất 3 ký tự).", 422)
-    limit = max(1, min(int(limit), 20))
-    terms = _topic_terms(topic)
-    normalized = _normalized_text(topic)
-    translations = {
-        "tri tue nhan tao": "artificial intelligence",
-        "sinh vien": "students", "giao duc": "education",
-        "hoc tap": "learning", "nang suat": "productivity",
-        "suc khoe": "health", "tam ly": "psychology",
-        "cam xuc": "sentiment", "kinh te": "economics",
-        "tai chinh": "finance", "moi truong": "environment",
-        "bien doi khi hau": "climate", "y te": "medical",
-        "viec lam": "employment", "thu nhap": "income",
-        "mang xa hoi": "social media", "ngon ngu": "language",
-    }
-    english = [v for k, v in translations.items() if k in normalized]
-    queries = [topic]
-    if english:
-        queries += [" ".join(english[:3]), *english]
-    if terms:
-        queries += [" ".join(terms[:3]), *terms[:5]]
-    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))[:12]
+async def discover_gap_datasets(
+    gap: dict[str, Any],
+    limit: int = 10,
+    max_search_seconds: float = 60,
+) -> dict[str, Any]:
+    """Search semantically related datasets for one selected gap.
 
+    The whole workflow (LLM query expansion + all Hub requests) shares one deadline.
+    It stops as soon as ``limit`` relevant candidates have been collected or that
+    deadline expires. Dataset metadata is ranked against the selected gap phrases,
+    never against the project's broad topic.
+    """
+    description = str(gap.get("description") or "").strip()
+    if len(description) < 3:
+        raise DataResearchError("Research gap được chọn không có mô tả hợp lệ.", 422)
+    limit = max(1, min(int(limit), 20))
+    max_search_seconds = max(1.0, min(float(max_search_seconds), 180.0))
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    deadline = started_at + max_search_seconds
+    seed_queries = _gap_seed_queries(gap)
+    used_queries: list[str] = []
+    query_queue: list[str] = []
     found: dict[str, dict[str, Any]] = {}
-    errors = []
+    request_errors: list[str] = []
+    expansion_round = 0
+    expansion_mode = "llm_with_gap_fallback"
+    llm_expansion_failed = False
+    stop_reason = "query_exhausted"
+
     headers = {"User-Agent": USER_AGENT}
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers) as client:
-        for query in queries:
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers
+    ) as client:
+        # LLM expansion is part of the same time budget. Keep a share of the
+        # deadline for actual Hub calls so a slow LLM cannot consume everything.
+        remaining = deadline - loop.time()
+        if remaining > 1.0:
+            expansion_round = 1
+            expansion_timeout = min(QUERY_EXPANSION_TIMEOUT, max(0.5, remaining * 0.2))
             try:
-                result = await _get_json(client, HUB_API, {"search": query, "limit": min(50, limit * 3)})
-            except DataResearchError as exc:
-                errors.append(exc)
+                expanded = await asyncio.wait_for(
+                    _expand_gap_queries(gap, [], expansion_round),
+                    timeout=expansion_timeout,
+                )
+                query_queue.extend(_dedupe_queries(expanded))
+            except Exception as exc:  # fallback keeps discovery available without an LLM key
+                logger.warning("Gap query expansion failed; using deterministic queries: %s", exc)
+                expansion_mode = "deterministic_fallback"
+                llm_expansion_failed = True
+        else:
+            expansion_mode = "deterministic_fallback"
+
+        query_queue.extend(_dedupe_queries(seed_queries, {
+            _normalized_text(query) for query in query_queue
+        }))
+
+        while len(found) < limit:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                stop_reason = "time_limit"
+                break
+
+            if not query_queue:
+                # The first synonym batch may not find enough data. Ask for a
+                # genuinely different batch, excluding every phrase already used.
+                if llm_expansion_failed or remaining < 1.0:
+                    stop_reason = "query_exhausted"
+                    break
+                expansion_round += 1
+                expansion_timeout = min(QUERY_EXPANSION_TIMEOUT, max(0.5, remaining * 0.2))
+                try:
+                    expanded = await asyncio.wait_for(
+                        _expand_gap_queries(gap, used_queries, expansion_round),
+                        timeout=expansion_timeout,
+                    )
+                except Exception as exc:
+                    logger.warning("Further gap query expansion failed: %s", exc)
+                    expansion_mode = "deterministic_fallback"
+                    llm_expansion_failed = True
+                    expanded = []
+                query_queue = _dedupe_queries(expanded, {
+                    _normalized_text(query) for query in used_queries
+                })
+                if not query_queue:
+                    stop_reason = "query_exhausted"
+                    break
+
+            query = query_queue.pop(0)
+            normalized_query = _normalized_text(query)
+            if normalized_query in {_normalized_text(x) for x in used_queries}:
                 continue
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                stop_reason = "time_limit"
+                break
+            used_queries.append(query)
+
+            try:
+                result = await asyncio.wait_for(
+                    _get_json(
+                        client,
+                        HUB_API,
+                        {
+                            "search": query,
+                            "limit": min(MAX_HUB_QUERY_RESULTS, max(50, limit * 5)),
+                            "sort": "downloads",
+                            "direction": "-1",
+                        },
+                        request_timeout=max(0.1, min(REQUEST_TIMEOUT, remaining)),
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                stop_reason = "time_limit"
+                break
+            except DataResearchError as exc:
+                request_errors.append(f"{query}: {exc.message}")
+                if exc.status_code == 429:
+                    stop_reason = "source_rate_limited"
+                    break
+                if loop.time() >= deadline:
+                    stop_reason = "time_limit"
+                    break
+                continue
+
             if not isinstance(result, list):
                 continue
             for item in result:
@@ -204,29 +422,67 @@ async def discover_datasets(topic: str, limit: int = 10) -> dict[str, Any]:
                 dataset_id = str(item["id"])
                 if not _DATASET_ID_RE.fullmatch(dataset_id):
                     continue
-                candidate = _to_candidate(item, terms)
-                # Include matches from translated search keywords in the score.
-                english_terms = _topic_terms(" ".join(english))
-                if english_terms:
-                    search_text = _normalized_text(" ".join([
-                        dataset_id, candidate["description"], " ".join(candidate["tags"])
-                    ]))
-                    translated_score = sum(t in search_text for t in english_terms) / len(english_terms)
-                    candidate["topic_match_score"] = round(max(candidate["topic_match_score"], translated_score), 3)
-                found[dataset_id] = candidate
+                candidate = _to_candidate(item, [query])
+                # Hugging Face search already matched the query; the metadata
+                # score is an additional relevance check/ranking signal.
+                if candidate["gap_match_score"] <= 0:
+                    continue
+                existing = found.get(dataset_id)
+                if existing is None:
+                    found[dataset_id] = candidate
+                else:
+                    existing["matched_queries"] = list(dict.fromkeys(
+                        existing["matched_queries"] + candidate["matched_queries"]
+                    ))[:12]
+                    existing["matched_terms"] = list(dict.fromkeys(
+                        existing["matched_terms"] + candidate["matched_terms"]
+                    ))
+                    if candidate["gap_match_score"] > existing["gap_match_score"]:
+                        candidate["matched_queries"] = existing["matched_queries"]
+                        candidate["matched_terms"] = existing["matched_terms"]
+                        found[dataset_id] = candidate
+
             if len(found) >= limit:
+                stop_reason = "enough_results"
                 break
 
-    if not found and errors:
-        raise errors[0]
-    candidates = sorted(found.values(), key=lambda x: (
-        x["topic_match_score"], x["downloads"], x["likes"]), reverse=True)[:limit]
+    elapsed = round(loop.time() - started_at, 2)
+    candidates = sorted(
+        found.values(),
+        key=lambda item: (item["gap_match_score"], item["downloads"], item["likes"]),
+        reverse=True,
+    )[:limit]
+    gap_summary = {
+        "gap_id": gap.get("gap_id", gap.get("id")),
+        "project_id": gap.get("project_id"),
+        "gap_type": gap.get("gap_type"),
+        "description": description,
+        "proposed_research_question": gap.get("proposed_research_question", ""),
+        "confirmed": bool(gap.get("confirmed", False)),
+    }
     return {
-        "topic": topic,
+        "input_source": "selected_research_gap",
+        "gap": gap_summary,
         "source": "Hugging Face Hub API",
         "count": len(candidates),
+        "requested_count": limit,
         "datasets": candidates,
-        "review_note": "Kết quả tìm theo từ khóa, cần kiểm tra dataset và giấy phép trước khi sử dụng.",
+        "search": {
+            "strategy": "LLM-generated near-synonym queries + deterministic gap phrases; metadata relevance ranking",
+            "query_expansion_mode": expansion_mode,
+            "queries_used": used_queries,
+            "searched_query_count": len(used_queries),
+            "elapsed_seconds": elapsed,
+            "time_budget_seconds": max_search_seconds,
+            "time_limit_reached": stop_reason == "time_limit",
+            "stop_reason": stop_reason,
+            "request_errors": request_errors[:5],
+        },
+        "review_note": (
+            "Danh sách được tìm theo research gap đã chọn, không theo toàn bộ topic. "
+            "Các truy vấn gần nghĩa giúp mở rộng cách diễn đạt; điểm khớp chỉ dựa trên metadata "
+            "của Hugging Face, vì vậy vẫn cần mở dataset, kiểm tra cột, mẫu, giấy phép và phạm vi dữ liệu trước khi chọn."
+        ),
     }
 
 

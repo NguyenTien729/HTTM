@@ -84,17 +84,30 @@ async def search_openalex(
     per_page: int = 50,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    sort: Optional[str] = None,
+    min_citations: Optional[int] = None,
 ) -> list[Paper]:
-    """Gọi OpenAlex /works, trả về list Paper đã parse (chưa dedup, chưa lưu DB)."""
+    """Gọi OpenAlex /works, trả về list Paper đã parse (chưa dedup, chưa lưu DB).
+
+    sort: ví dụ "cited_by_count:desc" để lấy các bài được trích dẫn nhiều nhất trước
+          (mặc định OpenAlex xếp theo độ liên quan khi có `search`).
+    min_citations: chỉ lấy bài có cited_by_count >= giá trị này."""
     params = {
         "search": query,
         "per-page": min(max(per_page, 1), 200),  # OpenAlex giới hạn tối đa 200/trang
     }
+    if sort:
+        params["sort"] = sort
 
     if not (from_date and to_date):
         from_date, to_date = _parse_date_range(date_range or "")
+    filters: list[str] = []
     if from_date and to_date:
-        params["filter"] = f"from_publication_date:{from_date},to_publication_date:{to_date}"
+        filters.append(f"from_publication_date:{from_date},to_publication_date:{to_date}")
+    if min_citations and min_citations > 0:
+        filters.append(f"cited_by_count:>{min_citations - 1}")   # ">N-1" tương đương ">= N"
+    if filters:
+        params["filter"] = ",".join(filters)
 
     # OpenAlex khuyến nghị thêm mailto để vào "polite pool" (nhanh + ổn định hơn).
     mailto = os.environ.get("OPENALEX_MAILTO")

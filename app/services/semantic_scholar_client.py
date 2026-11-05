@@ -42,8 +42,11 @@ def _parse(raw: dict, project_id: int) -> Optional[Paper]:
 async def search_semantic_scholar(
     query: str, project_id: int, date_range: Optional[str] = None, limit: int = 50,
     start_year: Optional[int] = None, end_year: Optional[int] = None,
+    min_citations: Optional[int] = None,
 ) -> list[Paper]:
     params = {"query": query, "limit": min(max(limit, 1), 100), "fields": _FIELDS}
+    if min_citations and min_citations > 0:
+        params["minCitationCount"] = min_citations
     if start_year and end_year:
         params["year"] = f"{start_year}-{end_year}"
     elif date_range and "-" in date_range:

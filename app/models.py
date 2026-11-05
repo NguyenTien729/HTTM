@@ -75,9 +75,11 @@ class Paper(BaseModel):
 class SearchResponse(BaseModel):
     project_id: int
     query_used: str
-    found: int          # tổng số kết quả thô từ OpenAlex
+    found: int          # số paper đạt mọi bộ lọc (đủ mới, đúng khu vực, đủ citation)
     saved: int          # số paper mới thực sự lưu (sau dedup)
     papers: List[Paper]
+    year_from: Optional[int] = None                  # paper được lấy từ năm này đến nay
+    min_citations_per_year: Optional[float] = None   # ngưỡng citation/năm thực tế đã áp dụng
 
 
 # ---- Module Paper Analyst rút gọn (chỉ dựa trên abstract, chưa đọc full-text PDF) ----

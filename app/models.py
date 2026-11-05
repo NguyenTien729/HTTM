@@ -18,6 +18,7 @@ class ResearchPlanRequest(BaseModel):
     target_venue: Optional[str] = Field(
         default=None, description="Journal/conference mục tiêu, ví dụ: 'Computers & Education'"
     )
+    region: Optional[str] = Field(default=None, description="Quốc gia/khu vực bắt buộc; bỏ trống để suy ra từ topic")
 
 
 class SearchStrategy(BaseModel):
@@ -42,6 +43,9 @@ class ResearchPlan(BaseModel):
     synonyms: List[KeywordSynonyms]
     research_questions: List[str]
     search_strategy: SearchStrategy
+    region: Optional[str] = None
+    region_terms: List[str] = Field(default_factory=list)
+    country_codes: List[str] = Field(default_factory=list)
 
 
 class ResearchPlanResponse(BaseModel):
@@ -58,6 +62,7 @@ class Paper(BaseModel):
     title: str
     authors: List[str] = Field(default_factory=list)
     year: Optional[int] = None
+    publication_date: Optional[str] = None
     doi: Optional[str] = None
     abstract: Optional[str] = None
     venue: Optional[str] = None
@@ -70,9 +75,11 @@ class Paper(BaseModel):
 class SearchResponse(BaseModel):
     project_id: int
     query_used: str
-    found: int          # tổng số kết quả thô từ OpenAlex
+    found: int          # số paper đạt mọi bộ lọc (đủ mới, đúng khu vực, đủ citation)
     saved: int          # số paper mới thực sự lưu (sau dedup)
     papers: List[Paper]
+    year_from: Optional[int] = None                  # paper được lấy từ năm này đến nay
+    min_citations_per_year: Optional[float] = None   # ngưỡng citation/năm thực tế đã áp dụng
 
 
 # ---- Module Paper Analyst rút gọn (chỉ dựa trên abstract, chưa đọc full-text PDF) ----
@@ -309,3 +316,54 @@ class WriteRelatedWorkResponse(BaseModel):
     project_id: int
     research_question_id: int
     related_work: RelatedWork
+
+    
+# ---- Module Scientific Writer: Discussion + Conclusion ----
+
+from typing import Any, Literal
+
+
+class HypothesisAssessment(BaseModel):
+    label: str
+    verdict: Literal[
+        "supported",
+        "not_supported",
+        "partially_supported",
+        "not_tested",
+    ]
+    explanation: str
+
+
+class DiscussionExtraction(BaseModel):
+    key_findings_paragraph: str
+    literature_comparison_paragraph: str
+    hypothesis_assessments: List[HypothesisAssessment] = Field(
+        default_factory=list
+    )
+    implications_paragraph: str
+    limitations_paragraph: str
+    future_work_paragraph: str
+
+
+class ConclusionExtraction(BaseModel):
+    conclusion_paragraph: str
+
+
+class Discussion(DiscussionExtraction):
+    id: Optional[int] = None
+    project_id: int
+    research_question_id: int
+    conclusion_paragraph: str
+    citations_used: List[int] = Field(default_factory=list)
+    citations_invalid: List[int] = Field(default_factory=list)
+    numbers_unverified: List[str] = Field(default_factory=list)
+
+
+class WriteDiscussionRequest(BaseModel):
+    analysis_result: dict[str, Any]
+
+
+class WriteDiscussionResponse(BaseModel):
+    project_id: int
+    research_question_id: int
+    discussion: Discussion

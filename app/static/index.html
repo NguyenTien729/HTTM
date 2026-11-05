@@ -1,0 +1,1118 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>
+      HTTM | Research Copilot
+    </title>
+    <style>
+      :root {
+        font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+        color-scheme: light;
+        --bg: #f4f6fa;
+        --surface: #fff;
+        --ink: #182337;
+        --muted: #617086;
+        --line: #dce3ec;
+        --primary: #3056d3;
+        --soft: #eef2ff;
+        --green: #15803d;
+        --amber: #b7791f;
+        --red: #c53030
+      }
+
+      * {
+        box-sizing: border-box
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-size: 14px;
+        line-height: 1.55
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit
+      }
+
+      button {
+        cursor: pointer
+      }
+
+      button:disabled {
+        opacity: .55;
+        cursor: wait
+      }
+
+      .shell {
+        max-width: 1180px;
+        margin: auto;
+        padding: 26px 22px 90px
+      }
+
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap
+      }
+
+      .brand {
+        font-size: 23px;
+        font-weight: 800;
+        letter-spacing: -.6px
+      }
+
+      .brand span {
+        color: var(--primary)
+      }
+
+      .sub {
+        color: var(--muted);
+        margin: 5px 0 24px
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        gap: 24px;
+        align-items: start
+      }
+
+      .side {
+        position: sticky;
+        top: 20px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px
+      }
+
+      .side h2 {
+        font-size: 13px;
+        margin: 0 0 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 1px
+      }
+
+      .navitem {
+        padding: 9px 10px;
+        border-radius: 9px;
+        color: var(--muted);
+        font-size: 12px;
+        display: flex;
+        gap: 9px;
+        align-items: center
+      }
+
+      .navitem.active {
+        background: var(--soft);
+        color: var(--primary);
+        font-weight: 700
+      }
+
+      .navitem.done {
+        color: var(--green)
+      }
+
+      .navnum {
+        display: grid;
+        place-items: center;
+        flex: none;
+        width: 23px;
+        height: 23px;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        font-size: 11px
+      }
+
+      .navitem.done .navnum {
+        background: var(--green);
+        color: white;
+        border-color: var(--green)
+      }
+
+      .progress {
+        height: 7px;
+        background: var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        margin: 16px 0 7px
+      }
+
+      .progress>div {
+        height: 100%;
+        width: 0;
+        background: var(--primary);
+        transition: width .25s
+      }
+
+      .progress-label {
+        font-size: 12px;
+        color: var(--muted)
+      }
+
+      .step {
+        display: flex;
+        gap: 13px;
+        margin-bottom: 13px
+      }
+
+      .dot {
+        flex: none;
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        background: white;
+        border: 2px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 15px
+      }
+
+      .step.done .dot {
+        background: var(--green);
+        color: white;
+        border-color: var(--green)
+      }
+
+      .step.run .dot,
+      .step.wait .dot {
+        border-color: var(--primary);
+        color: var(--primary)
+      }
+
+      .step.err .dot {
+        background: var(--red);
+        color: white;
+        border-color: var(--red)
+      }
+
+      .card {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+        padding: 17px 20px;
+        box-shadow: 0 2px 9px #1a305009
+      }
+
+      .step.pending .card {
+        opacity: .52
+      }
+
+      .step.wait .card,
+      .step.run .card {
+        border-color: #a8baf5;
+        box-shadow: 0 0 0 3px #dce5ff
+      }
+
+      .ttl {
+        font-weight: 750;
+        font-size: 15px
+      }
+
+      .tag {
+        font-size: 10px;
+        color: #76510b;
+        background: #fff0c5;
+        padding: 3px 7px;
+        border-radius: 12px;
+        margin-left: 9px
+      }
+
+      .sum {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 3px
+      }
+
+      .body {
+        margin-top: 12px
+      }
+
+      .body:empty {
+        display: none
+      }
+
+      label.field {
+        display: block;
+        font-size: 12px;
+        font-weight: 650;
+        color: var(--muted);
+        margin: 12px 0 5px
+      }
+
+      input:not([type=checkbox]):not([type=radio]),
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 10px 11px;
+        background: white;
+        color: var(--ink);
+        outline: none
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px #3056d318
+      }
+
+      textarea {
+        resize: vertical;
+        min-height: 85px
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px
+      }
+
+      .row.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr))
+      }
+
+      .btn,
+      button {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: white;
+        color: var(--ink);
+        padding: 9px 14px;
+        text-decoration: none;
+        display: inline-block;
+        margin-top: 10px
+      }
+
+      .btn.primary,
+      button.primary {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+        font-weight: 650
+      }
+
+      button+button {
+        margin-left: 8px
+      }
+
+      .error {
+        color: var(--red);
+        white-space: pre-wrap;
+        margin-top: 10px
+      }
+
+      .warning {
+        background: #fff9e9;
+        border: 1px solid #f3d9a3;
+        color: #815b14;
+        border-radius: 9px;
+        padding: 10px 12px;
+        margin: 10px 0
+      }
+
+      .info {
+        background: var(--soft);
+        padding: 10px 12px;
+        border-radius: 9px;
+        margin: 10px 0
+      }
+
+      .option {
+        display: block;
+        border: 1px solid var(--line);
+        padding: 12px;
+        border-radius: 10px;
+        margin: 9px 0;
+        cursor: pointer
+      }
+
+      .option:has(input:checked) {
+        border-color: var(--primary);
+        background: var(--soft)
+      }
+
+      .option small {
+        display: block;
+        color: var(--muted);
+        margin: 3px 0 0 24px
+      }
+
+      .option input {
+        margin-right: 8px
+      }
+
+      details {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        margin: 9px 0;
+        padding: 10px
+      }
+
+      summary {
+        cursor: pointer;
+        color: var(--primary);
+        font-weight: 650
+      }
+
+      .pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin-top: 10px
+      }
+
+      .scroll {
+        overflow: auto;
+        max-width: 100%
+      }
+
+      table {
+        border-collapse: collapse;
+        font-size: 12px;
+        min-width: 520px
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 8px;
+        text-align: left;
+        vertical-align: top
+      }
+
+      th {
+        background: #f7f9fc
+      }
+
+      .papers {
+        display: grid;
+        gap: 9px;
+        margin-top: 12px
+      }
+
+      .paper {
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px
+      }
+
+      .paper strong {
+        display: block
+      }
+
+      .paper small {
+        display: block;
+        color: var(--muted);
+        margin: 3px 0
+      }
+
+      .paper a {
+        color: var(--primary)
+      }
+
+      .pill {
+        display: inline-block;
+        background: var(--soft);
+        color: var(--primary);
+        border-radius: 14px;
+        padding: 2px 7px;
+        font-size: 11px;
+        margin: 4px 5px 0 0
+      }
+
+      .muted {
+        color: var(--muted)
+      }
+
+      ul {
+        padding-left: 20px
+      }
+
+      .footer {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 22px 0
+      }
+
+      @media(max-width:850px) {
+        .layout {
+          grid-template-columns: 1fr
+        }
+
+        .side {
+          position: static
+        }
+
+        .side nav {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr))
+        }
+      }
+
+      @media(max-width:520px) {
+        .shell {
+          padding: 16px 12px 60px
+        }
+
+        .side nav {
+          grid-template-columns: 1fr
+        }
+
+        .row,
+        .row.three {
+          grid-template-columns: 1fr
+        }
+
+        .card {
+          padding: 13px
+        }
+
+        .brand {
+          font-size: 20px
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="top">
+        <div class="brand">
+          HTTM
+          <span>
+            Research Copilot
+          </span>
+        </div>
+        <button id="reset">
+          ↻ Bắt đầu lại
+        </button>
+      </div>
+      <p class="sub">
+        Quy trình nghiên cứu khoa học có kiểm soát • Chỉ dừng ở những bước cần quyết định của bạn
+      </p>
+      <div class="layout">
+        <aside class="side">
+          <h2>
+            Tiến trình nghiên cứu
+          </h2>
+          <nav id="nav">
+          </nav>
+          <div class="progress">
+            <div id="bar">
+            </div>
+          </div>
+          <div id="progress-label" class="progress-label">
+          </div>
+          <p class="footer">
+            Kết quả được lưu tạm trên trình duyệt này. Các bước đã hoàn tất không tự chạy lại khi tải trang.
+          </p>
+        </aside>
+        <main id="steps">
+        </main>
+      </div>
+    </div>
+    <script>
+      'use strict';
+      const $ = s => document.querySelector(s);
+
+      function el(tag, attrs = {}, ...children) {
+        const e = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === 'class') e.className = v;
+          else if (k === 'onclick') e.onclick = v;
+          else if (k === 'value' && ['input', 'textarea', 'select'].includes(tag)) e.value = v;
+          else if (v !== null && v !== undefined && v !== false) e.setAttribute(k, v === true ? '' :
+            String(v))
+        }
+        for (const child of children.flat()) {
+          if (child === null || child === undefined || child === false) continue;
+          e.append(child instanceof Node ? child : document.createTextNode(String(child)))
+        }
+        return e
+      }
+      const field = (name, node) => el('div', {}, el('label', {
+        class: 'field'
+      }, name), node);
+      const note = (s, kind = 'info') => el('div', {
+        class: kind
+      }, s);
+      const list = items => el('ul', {}, (items || []).map(x => el('li', {}, String(x))));
+      const detail = (name, value) => el('details', {}, el('summary', {}, name), el('div', {
+        class: 'pre'
+      }, value || 'Không có dữ liệu'));
+
+      function tab(rows, cols) {
+        return el('div', {
+          class: 'scroll'
+        }, el('table', {}, el('thead', {}, el('tr', {}, cols.map(c => el('th', {}, c)))), el(
+        'tbody', {}, (rows || []).map(r => el('tr', {}, cols.map(c => el('td', {}, typeof r[c] ===
+          'object' ? JSON.stringify(r[c]) : String(r[c] ?? ''))))))))
+      }
+      async function api(method, path, data) {
+        let response;
+        try {
+          response = await fetch(path, {
+            method,
+            headers: data === undefined ? {} : {
+              'Content-Type': 'application/json'
+            },
+            body: data === undefined ? undefined : JSON.stringify(data)
+          })
+        } catch (e) {
+          throw Error('Không kết nối được API. Kiểm tra Docker và địa chỉ /ui/. ' + e.message)
+        }
+        if (!response.ok) {
+          let msg = 'HTTP ' + response.status;
+          try {
+            const d = (await response.json()).detail;
+            msg = typeof d === 'string' ? d : JSON.stringify(d) || msg
+          } catch {}
+          throw Error(msg)
+        }
+        return response
+      }
+      const json = async (m, p, b) => (await api(m, p, b)).json();
+
+      function gate(box, label, fn) {
+        return new Promise(resolve => {
+          const error = el('div', {
+            class: 'error'
+          });
+          const button = el('button', {
+            class: 'primary',
+            onclick: async () => {
+              button.disabled = true;
+              error.textContent = '';
+              try {
+                resolve(await fn())
+              } catch (e) {
+                error.textContent = e.message;
+                button.disabled = false
+              }
+            }
+          }, label);
+          box.append(error, button)
+        })
+      }
+      const KEY = 'httm_state_v2';
+      let state;
+      try {
+        state = JSON.parse(localStorage.getItem(KEY))
+      } catch {}
+      if (!state || !Number.isInteger(state.i) || !state.ctx) state = {
+        i: 0,
+        ctx: {},
+        sum: []
+      };
+      const save = () => {
+        try {
+          localStorage.setItem(KEY, JSON.stringify(state))
+        } catch {}
+      };
+      const steps = [{
+        title: 'Research Plan — Nhập đề tài',
+        section: 'Lập kế hoạch',
+        input: true,
+        async run(c, box) {
+          const topic = el('textarea', {
+            placeholder: 'Ví dụ: Tác động của AI đến kết quả học tập của sinh viên Việt Nam',
+            value: c.topic || ''
+          });
+          const region = el('input', {
+            placeholder: 'Vietnam, Southeast Asia… (để trống nếu không giới hạn)',
+            value: c.region || ''
+          });
+          const lang = el('select', {}, el('option', {
+            value: 'en'
+          }, 'English — bài báo tiếng Anh'), el('option', {
+            value: 'vi'
+          }, 'Tiếng Việt — ngôn ngữ mong muốn'));
+          lang.value = c.language || 'en';
+          const count = el('input', {
+            type: 'number',
+            min: 1,
+            max: 500,
+            value: c.count || 30
+          });
+          const type = el('input', {
+            placeholder: 'survey / experiment / review'
+          });
+          const venue = el('input', {
+            placeholder: 'Tạp chí/hội nghị (tuỳ chọn)'
+          });
+          box.append(field('Chủ đề nghiên cứu *', topic), field(
+            'Quốc gia / khu vực nghiên cứu (Region)', region), note(
+            'Nếu để trống Region, hệ thống có thể suy ra khu vực từ đề tài. Bộ lọc Region chỉ hoạt động khi backend đã cập nhật. Ngôn ngữ paper là ưu tiên trong plan, không phải bộ lọc bắt buộc.'
+            ), el('div', {
+            class: 'row three'
+          }, field('Ngôn ngữ tài liệu', lang), field('Số bài báo mục tiêu', count), field(
+            'Loại nghiên cứu', type)), field('Tạp chí mục tiêu (tuỳ chọn)', venue));
+          return gate(box, 'Tạo Research Plan →', async () => {
+            if (topic.value.trim().length < 5) throw Error('Đề tài phải có ít nhất 5 ký tự.');
+            const n = Number(count.value);
+            if (!Number.isInteger(n) || n < 1 || n > 500) throw Error(
+              'Số paper phải từ 1 đến 500.');
+            const payload = {
+              topic: topic.value.trim(),
+              region: region.value.trim() || null,
+              language: lang.value,
+              target_paper_count: n
+            };
+            if (type.value.trim()) payload.study_type = type.value.trim();
+            if (venue.value.trim()) payload.target_venue = venue.value.trim();
+            const r = await json('POST', '/plan', payload);
+            if (!r.id || !r.plan) throw Error('API /plan không trả dữ liệu hợp lệ.');
+            Object.assign(c, {
+              pid: r.id,
+              topic: payload.topic,
+              region: payload.region,
+              language: payload.language,
+              count: n,
+              plan: r.plan
+            });
+            box.replaceChildren(note('Đã tạo project #' + r.id), el('div', {}, 'Khu vực: ' + (
+              r.plan.region || 'Không giới hạn')), el('div', {}, 'Từ khóa: ' + (r.plan
+              .keywords || []).join(', ')));
+            return 'Project #' + r.id + ' • ' + (r.plan.region || 'không giới hạn khu vực')
+          })
+        }
+      }, {
+        title: 'Literature Search — Bài báo mới nhất',
+        section: 'Tổng quan tài liệu',
+        async run(c, box) {
+          const r = await json('POST', '/search/' + c.pid);
+          const papers = (r.papers || []).slice().sort((a, b) => (b.publication_date || String(b
+            .year || '')).localeCompare(a.publication_date || String(a.year || '')));
+          c.paperCount = papers.length;
+          const region = c.plan?.region || c.region;
+          box.append(note(
+            'Kết quả được xếp mới nhất trước theo publication_date (nếu có), sau đó theo năm. ' +
+            (region ? 'Khu vực yêu cầu: ' + region + '.' : 'Không giới hạn khu vực.')));
+          if (!papers.length) box.append(note(
+            'Không có bài báo phù hợp. Có thể cần mở rộng phạm vi thời gian hoặc điều chỉnh Region.',
+            'warning'));
+          const holder = el('div', {
+            class: 'papers'
+          });
+          papers.forEach(p => {
+            const item = el('article', {
+              class: 'paper'
+            }, el('strong', {}, p.title || 'Không có tiêu đề'), el('small', {}, [p
+              .publication_date || p.year || 'Không rõ ngày', p.venue || '', p.source ||
+              ''
+            ].filter(Boolean).join(' • ')));
+            if (p.doi) item.append(el('span', {
+              class: 'pill'
+            }, 'DOI: ' + p.doi));
+            if (p.pdf_url) item.append(el('a', {
+              href: p.pdf_url,
+              target: '_blank',
+              rel: 'noopener noreferrer'
+            }, ' PDF toàn văn'));
+            else if (p.url) item.append(el('a', {
+              href: p.url,
+              target: '_blank',
+              rel: 'noopener noreferrer'
+            }, ' Xem bài báo'));
+            holder.append(item)
+          });
+          box.append(holder, detail('Truy vấn tìm kiếm', r.query_used || ''));
+          return `Tìm thấy ${r.found||0}, lưu mới ${r.saved||0} bài • ${papers.length} bài hiển thị`
+        }
+      }, {
+        title: 'Phân tích từng paper',
+        section: 'Tổng quan tài liệu',
+        async run(c, box) {
+          const r = await json('POST', '/analyze/' + c.pid);
+          box.append(detail('Phát hiện chính', (r.analyses || []).map(a =>
+            `[${a.paper_id}] ${a.key_finding}`).join('\n\n')));
+          return `${r.total_analyzed||0} bài đã phân tích • ${r.fulltext_used||0} bài dùng full-text trong lượt này`
+        }
+      }, {
+        title: 'Tổng hợp themes',
+        section: 'Tổng quan tài liệu',
+        async run(c, box) {
+          const r = await json('POST', '/synthesize/' + c.pid);
+          box.append(list((r.themes || []).map(t =>
+            `${t.name} (${(t.paper_ids||[]).length} paper)`)));
+          return (r.themes || []).length + ' themes'
+        }
+      }, {
+        title: 'Phát hiện research gaps',
+        section: 'Câu hỏi nghiên cứu',
+        async run(c, box) {
+          const r = await json('POST', `/synthesize/${c.pid}/gaps`);
+          c.gaps = r.gaps || [];
+          box.append(list(c.gaps.map(g => g.description)));
+          return c.gaps.length + ' gaps được đề xuất'
+        }
+      }, {
+        title: 'Duyệt research gap',
+        section: 'Câu hỏi nghiên cứu',
+        input: true,
+        async run(c, box) {
+          if (!c.gaps?.length) throw Error('Chưa có research gap.');
+          box.append(note(
+            'Gap chỉ là khoảng trống tiềm năng trong tập bài báo đã tìm; cần kiểm tra trước khi duyệt.',
+            'warning'));
+          c.gaps.forEach(g => box.append(el('label', {
+            class: 'option'
+          }, el('input', {
+            type: 'radio',
+            name: 'gap',
+            value: g.id
+          }), el('strong', {}, g.gap_type + ' — ' + g.description), el('small', {},
+            'Câu hỏi gợi ý: ' + g.proposed_research_question), el('small', {},
+            'Bằng chứng: ' + (g.evidence_paper_ids || []).join(', ')))));
+          return gate(box, 'Duyệt gap đã chọn →', async () => {
+            const selected = box.querySelector('input[name=gap]:checked');
+            if (!selected) throw Error('Hãy chọn một gap.');
+            await json('POST', `/synthesize/${c.pid}/gaps/${selected.value}/approve`);
+            c.gapId = Number(selected.value);
+            box.replaceChildren(note('Đã duyệt gap #' + c.gapId));
+            return 'Gap #' + c.gapId + ' đã duyệt'
+          })
+        }
+      }, {
+        title: 'Research Questions & Hypotheses',
+        section: 'Câu hỏi nghiên cứu',
+        async run(c, box) {
+          const r = await json('POST', '/research-questions/gap/' + c.gapId);
+          const q = r.research_question;
+          c.rq = q;
+          c.rqId = q.id;
+          box.append(el('p', {}, el('strong', {}, 'RQ: '), q.rq_text));
+          if (q.variables?.length) box.append(detail('Các biến', q.variables.map(v =>
+            `${v.name}: ${v.role}`).join('\n')));
+          if (q.hypotheses?.length) box.append(list(q.hypotheses.map(h => h.label + ': ' + h
+            .statement)));
+          return 'Research Question #' + q.id
+        }
+      }, {
+        title: 'Viết Introduction',
+        section: 'Viết bài báo',
+        async run(c, box) {
+          const r = (await json('POST', '/write/introduction/' + c.rqId)).introduction;
+          box.append(detail('Introduction', [r.background, r.problem_statement, r
+            .existing_knowledge, r.literature_limitation, r.research_gap_statement, r
+            .research_question_statement, r.contribution_statement
+          ].join('\n\n')));
+          if (r.citations_invalid?.length) box.append(note('Citation chưa hợp lệ: ' + r
+            .citations_invalid.join(', '), 'warning'));
+          return (r.citations_used || []).length + ' citations hợp lệ'
+        }
+      }, {
+        title: 'Viết Related Work',
+        section: 'Viết bài báo',
+        async run(c, box) {
+          const r = (await json('POST', '/write/related-work/' + c.rqId)).related_work;
+          box.append(detail('Related Work', [...(r.theme_paragraphs || []).map(t => t.theme_name +
+            '\n' + t.paragraph), r.contradictions_paragraph, r.gap_paragraph].join('\n\n')));
+          if (r.citations_invalid?.length) box.append(note('Citation chưa hợp lệ: ' + r
+            .citations_invalid.join(', '), 'warning'));
+          return (r.citations_used || []).length + ' citations hợp lệ'
+        }
+      }, {
+        title: 'Tìm dataset trên Hugging Face',
+        section: 'Phân tích dữ liệu',
+        async run(c, box) {
+          const r = await json('POST', '/data-research/discover', {
+              project_id: c.pid,
+              gap_id: c.gapId,
+              limit: 10
+          });
+          c.datasets = r.datasets || [];
+          box.append(list(c.datasets.map(d => d.dataset_id)));
+          return c.datasets.length + ' dataset ứng viên'
+        }
+      }, {
+        title: 'Chọn dataset',
+        section: 'Phân tích dữ liệu',
+        input: true,
+        async run(c, box) {
+          box.append(note(
+            'Điểm phù hợp dựa trên metadata; hãy kiểm tra mô tả, giấy phép và dữ liệu thực tế.',
+            'warning'));
+          (c.datasets || []).forEach(d => box.append(el('label', {
+            class: 'option'
+          }, el('input', {
+            type: 'radio',
+            name: 'dataset',
+            value: d.dataset_id
+          }), el('strong', {}, d.dataset_id), el('small', {},
+            `Điểm: ${d.topic_match_score??'?'} • Lượt tải: ${d.downloads??'?'} • License: ${d.license||'không rõ'}`
+            ), el('small', {}, (d.description || '').slice(0, 250)), d.dataset_url ? el(
+          'a', {
+            href: d.dataset_url,
+            target: '_blank',
+            rel: 'noopener noreferrer'
+          }, 'Mở Hugging Face') : '')));
+          const own = el('input', {
+            placeholder: 'owner/dataset-name'
+          });
+          box.append(field('Hoặc nhập dataset ID', own));
+          return gate(box, 'Chọn dataset →', async () => {
+            const selected = box.querySelector('input[name=dataset]:checked');
+            c.datasetId = own.value.trim() || selected?.value;
+            if (!c.datasetId) throw Error('Hãy chọn hoặc nhập dataset ID.');
+            box.replaceChildren(note('Đã chọn ' + c.datasetId));
+            return c.datasetId
+          })
+        }
+      }, {
+        title: 'Kiểm tra dataset',
+        section: 'Phân tích dữ liệu',
+        back: 10,
+        async run(c, box) {
+          const r = await json('POST', '/data-research/inspect', {
+            dataset_id: c.datasetId
+          });
+          c.inspect = {
+            splits: r.available_splits || [],
+            columns: r.columns || [],
+            preview: (r.preview_rows || []).slice(0, 5),
+            checklist: r.review_checklist || [],
+            total: r.num_rows_total
+          };
+          box.append(detail('Danh sách cột', c.inspect.columns.map(x => x.name).join(', ')));
+          return `${c.inspect.columns.length} cột • ${c.inspect.splits.length} split`
+        }
+      }, {
+        title: 'Xác nhận dataset và biến',
+        section: 'Phân tích dữ liệu',
+        input: true,
+        async run(c, box) {
+          const I = c.inspect;
+          if (!I?.splits?.length) throw Error('Dataset không có split hợp lệ.');
+          const cols = I.columns.map(x => x.name);
+          box.append(note('Phân tích khám phá không chứng minh quan hệ nhân quả.', 'warning'), list(
+            I.checklist));
+          if (c.rq?.variables?.length) box.append(detail('Biến theo Research Question', c.rq
+            .variables.map(v => v.name + ' (' + v.role + ')').join('\n')));
+          box.append(el('strong', {}, 'Xem trước dữ liệu'), tab(I.preview, cols.slice(0, 8)));
+          const split = el('select', {}, I.splits.map((s, i) => el('option', {
+            value: i
+          }, `${s.config} / ${s.split} (${s.num_rows??'?'} dòng)`)));
+          const options = () => [el('option', {
+            value: ''
+          }, '— Không chọn —'), ...cols.map(x => el('option', {
+            value: x
+          }, x))];
+          const target = el('select', {}, options()),
+            group = el('select', {}, options()),
+            max = el('input', {
+              type: 'number',
+              min: 100,
+              max: 100000,
+              value: 50000
+            });
+          const predictors = el('div', {}, cols.map(x => el('label', {
+            class: 'option'
+          }, el('input', {
+            type: 'checkbox',
+            value: x
+          }), x)));
+          const confirm = el('input', {
+            type: 'checkbox'
+          });
+          box.append(field('Split phân tích', split), el('div', {
+              class: 'row three'
+            }, field('Biến phụ thuộc', target), field('Biến nhóm', group), field(
+              'Số dòng tối đa', max)), detail('Chọn biến giải thích (tối đa 10)', ''), predictors,
+            el('label', {
+              class: 'option'
+            }, confirm, 'Tôi đã kiểm tra và đồng ý phân tích dataset này.'));
+          return gate(box, 'Xác nhận và tiếp tục →', async () => {
+            if (!confirm.checked) throw Error('Bạn cần xác nhận dataset.');
+            const p = [...predictors.querySelectorAll('input:checked')].map(x => x.value);
+            if (p.length > 10) throw Error('Chọn tối đa 10 biến giải thích.');
+            const s = I.splits[Number(split.value)];
+            c.selection = {
+              dataset_id: c.datasetId,
+              config: s.config,
+              split: s.split,
+              confirm_dataset: true,
+              max_rows: Math.max(100, Math.min(100000, Number(max.value) || 50000)),
+              predictor_columns: p
+            };
+            if (target.value) c.selection.target_column = target.value;
+            if (group.value) c.selection.group_column = group.value;
+            box.replaceChildren(note(`Đã xác nhận: ${c.datasetId} — ${s.config}/${s.split}`));
+            return `${s.config}/${s.split}`
+          })
+        }
+      }, {
+        title: 'Phân tích thống kê',
+        section: 'Phân tích dữ liệu',
+        back: 12,
+        async run(c, box) {
+          c.analysis = await json('POST', '/data-research/analyze', c.selection);
+          box.append(detail('Results (bản nháp)', c.analysis.results_draft));
+          const o = c.analysis.overview || {};
+          return `${o.rows_analyzed??'?'} dòng • ${o.columns_count??'?'} cột`
+        }
+      }, {
+        title: 'Viết Discussion & Conclusion',
+        section: 'Viết bài báo',
+        async run(c, box) {
+          const d = (await json('POST', '/write/discussion/' + c.rqId, {
+            analysis_result: c.analysis
+          })).discussion;
+          box.append(detail('Conclusion', d.conclusion_paragraph), detail('Đánh giá giả thuyết', (d
+            .hypothesis_assessments || []).map(x => x.label + ': ' + x.verdict).join('\n')));
+          if (d.numbers_unverified?.length) box.append(note('Số liệu cần kiểm tra: ' + d
+            .numbers_unverified.join(', '), 'warning'));
+          if (d.citations_invalid?.length) box.append(note('Citation không hợp lệ: ' + d
+            .citations_invalid.join(', '), 'warning'));
+          return 'Đã hoàn thành Discussion & Conclusion'
+        }
+      }, {
+        title: 'Xuất bài báo PDF',
+        section: 'Xuất bản',
+        async run(c, box) {
+          const blob = await (await api('POST', '/export/paper/' + c.rqId)).blob();
+          if (!blob.size) throw Error('PDF trả về rỗng.');
+          const url = URL.createObjectURL(blob);
+          const a = el('a', {
+            class: 'btn primary',
+            href: url,
+            download: `research_paper_rq_${c.rqId}.pdf`
+          }, '↓ Tải bài báo PDF');
+          box.append(a, note(
+            'Kiểm tra mục ghi chú tác giả và toàn bộ trích dẫn trước khi sử dụng.'));
+          return 'Hoàn tất • PDF sẵn sàng tải xuống'
+        }
+      }];
+      const cards = [];
+      steps.forEach((step, i) => {
+        const dot = el('div', {
+            class: 'dot'
+          }, i + 1),
+          summary = el('div', {
+            class: 'sum'
+          }),
+          body = el('div', {
+            class: 'body'
+          }),
+          root = el('section', {
+            class: 'step pending'
+          }, dot, el('div', {
+            class: 'card'
+          }, el('div', {}, el('span', {
+            class: 'ttl'
+          }, step.title), step.input ? el('span', {
+            class: 'tag'
+          }, 'CẦN BẠN') : ''), summary, body));
+        $('#steps').append(root);
+        cards.push({
+          root,
+          dot,
+          summary,
+          body
+        });
+        const nav = el('div', {
+          class: 'navitem'
+        }, el('span', {
+          class: 'navnum'
+        }, i + 1), step.title);
+        $('#nav').append(nav)
+      });
+
+      function update() {
+        cards.forEach((card, i) => {
+          const stateClass = i < state.i ? 'done' : i === state.i ? 'active' : '';
+          const n = $('#nav').children[i];
+          n.className = 'navitem ' + stateClass;
+          n.querySelector('.navnum').textContent = i < state.i ? '✓' : i + 1
+        });
+        $('#bar').style.width = (100 * state.i / steps.length) + '%';
+        $('#progress-label').textContent = `${state.i}/${steps.length} bước đã hoàn tất`
+      }
+
+      function status(i, kind, summary) {
+        const card = cards[i];
+        card.root.className = 'step ' + kind;
+        card.dot.textContent = kind === 'done' ? '✓' : kind === 'err' ? '!' : kind === 'wait' ? '?' : i +
+          1;
+        if (summary !== undefined) card.summary.textContent = summary;
+        update()
+      }
+      steps.forEach((_, i) => {
+        if (i < state.i) status(i, 'done', state.sum[i] || 'Đã hoàn thành')
+      });
+      let busy = false;
+      async function run() {
+        if (busy) return;
+        busy = true;
+        while (state.i < steps.length) {
+          const i = state.i,
+            step = steps[i],
+            card = cards[i];
+          status(i, step.input ? 'wait' : 'run', step.input ? 'Đang chờ xác nhận' : 'Đang xử lý…');
+          card.body.replaceChildren();
+          card.root.scrollIntoView({
+            behavior: 'smooth',
+            block: 'nearest'
+          });
+          try {
+            const result = await step.run(state.ctx, card.body);
+            state.sum[i] = result || 'Đã hoàn thành';
+            status(i, 'done', state.sum[i]);
+            state.i++;
+            save();
+            update()
+          } catch (e) {
+            status(i, 'err', 'Có lỗi xảy ra');
+            card.body.append(el('div', {
+              class: 'error'
+            }, e.message || String(e)), el('button', {
+              class: 'primary',
+              onclick: () => {
+                busy = false;
+                run()
+              }
+            }, 'Thử lại'));
+            if (step.back !== undefined) card.body.append(el('button', {
+              onclick: () => {
+                state.i = step.back;
+                state.sum.length = state.i;
+                save();
+                location.reload()
+              }
+            }, 'Quay lại bước chọn'));
+            busy = false;
+            return
+          }
+        }
+        busy = false;
+        $('#steps').append(el('button', {
+          class: 'primary',
+          onclick: () => $('#reset').click()
+        }, 'Bắt đầu nghiên cứu mới'))
+      }
+      $('#reset').onclick = () => {
+        if (confirm('Xóa tiến trình đang lưu trên trình duyệt và bắt đầu nghiên cứu mới?')) {
+          localStorage.removeItem(KEY);
+          location.reload()
+        }
+      };
+      update();
+      run();
+    </script>
+  </body>
+</html>

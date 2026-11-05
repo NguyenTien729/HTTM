@@ -15,7 +15,7 @@ from app.models import Paper
 logger = logging.getLogger(__name__)
 
 S2_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-_FIELDS = "title,abstract,year,venue,externalIds,citationCount,openAccessPdf,authors,url"
+_FIELDS = "title,abstract,year,venue,externalIds,citationCount,openAccessPdf,authors,url,publicationDate"
 
 
 def _parse(raw: dict, project_id: int) -> Optional[Paper]:
@@ -28,6 +28,7 @@ def _parse(raw: dict, project_id: int) -> Optional[Paper]:
         title=title,
         authors=[a["name"] for a in raw.get("authors") or [] if a.get("name")],
         year=raw.get("year"),
+        publication_date=raw.get("publicationDate"),
         doi=doi.lower() if doi else None,
         abstract=raw.get("abstract"),
         venue=raw.get("venue") or None,
@@ -39,10 +40,16 @@ def _parse(raw: dict, project_id: int) -> Optional[Paper]:
 
 
 async def search_semantic_scholar(
-    query: str, project_id: int, date_range: Optional[str] = None, limit: int = 50
+    query: str, project_id: int, date_range: Optional[str] = None, limit: int = 50,
+    start_year: Optional[int] = None, end_year: Optional[int] = None,
+    min_citations: Optional[int] = None,
 ) -> list[Paper]:
     params = {"query": query, "limit": min(max(limit, 1), 100), "fields": _FIELDS}
-    if date_range and "-" in date_range:
+    if min_citations and min_citations > 0:
+        params["minCitationCount"] = min_citations
+    if start_year and end_year:
+        params["year"] = f"{start_year}-{end_year}"
+    elif date_range and "-" in date_range:
         params["year"] = date_range.replace(" ", "")
     headers = {}
     if os.environ.get("SEMANTIC_SCHOLAR_API_KEY"):

@@ -12,10 +12,15 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()  # đọc .env trước khi bất cứ module nào đọc os.environ
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.db import connect_db, close_db
-from app.routers import planner, search, analysis, synthesis, research_questions, writer, related_work, export, reviewer
+from app.routers import planner, search, analysis, synthesis, research_questions, writer, related_work, discussion, export, reviewer 
 
 
 @asynccontextmanager
@@ -42,6 +47,7 @@ app.include_router(synthesis.router)
 app.include_router(research_questions.router)
 app.include_router(writer.router)
 app.include_router(related_work.router)
+app.include_router(discussion.router)
 app.include_router(export.router)
 app.include_router(reviewer.router)
 
@@ -49,3 +55,19 @@ app.include_router(reviewer.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# Frontend đơn giản (app/static/index.html): mở http://127.0.0.1:8000/ui/
+# CORS mở cho môi trường dev để file index.html mở trực tiếp (file://) vẫn gọi được API.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse("/ui/" if _STATIC_DIR.exists() else "/docs")
+
+
+if _STATIC_DIR.exists():  # thiếu thư mục thì bỏ qua thay vì làm server không khởi động được
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")

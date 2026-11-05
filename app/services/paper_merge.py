@@ -20,7 +20,7 @@ def merge_papers(*lists: list[Paper]) -> list[Paper]:
                 merged[k] = p
                 continue
             base = merged[k]
-            for field in ("abstract", "pdf_url", "doi", "venue", "year"):
+            for field in ("abstract", "pdf_url", "doi", "venue", "year", "publication_date"):
                 if not getattr(base, field) and getattr(p, field):
                     setattr(base, field, getattr(p, field))
             base.citation_count = max(base.citation_count, p.citation_count)

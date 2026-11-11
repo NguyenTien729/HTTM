@@ -1,32 +1,35 @@
+"""Conservative concept-aware query generation for OpenAlex.
+
+Use the original topic as an anchor, with a small set of planner keywords as
+optional expansion. Final precision is enforced by the relevance screen.
 """
-Query Generator: Research Plan → search query string.
-
-OpenAlex hỗ trợ boolean operators (AND/OR/NOT) và dấu ngoặc kép cho phrase
-trong param `search`. Ta build query dạng:
-
-    ("keyword1" OR "synonym1a" OR "synonym1b") OR ("keyword2" OR "synonym2a")
-
-Mỗi keyword và các synonym của nó nằm trong 1 nhóm OR — nhóm với nhóm cũng OR
-với nhau (broad search ở bước lấy paper, việc relevance ranking/filter tinh hơn
-để module sau xử lý, không cố gắng làm query quá hẹp ngay từ đầu).
-"""
-
+import re
 from app.models import ResearchPlan
+from app.services.recency_region import region_terms
+
+
+def _quote(value: str) -> str:
+    return '"' + re.sub(r'["\\\r\n]+', ' ', value).strip() + '"'
 
 
 def build_query_from_plan(plan: ResearchPlan) -> str:
-    groups: list[str] = []
-
+    # Use two planner concepts together instead of OR-ing every broad keyword.
+    # Synonyms stay inside their own OR group. Avoid forcing all planner terms.
+    groups = []
     for kw in plan.keywords:
-        terms = [f'"{kw}"']
-        # Gộp synonym tương ứng với keyword này nếu có khai báo trong plan
-        matching = next((s for s in plan.synonyms if s.keyword == kw), None)
-        if matching:
-            terms.extend(f'"{syn}"' for syn in matching.synonyms)
-        groups.append("(" + " OR ".join(terms) + ")")
-
-    if not groups:
-        # Fallback an toàn: chưa có keyword nào thì search luôn theo topic
-        return plan.topic
-
-    return " OR ".join(groups)
+        kw = kw.strip()
+        if not kw:
+            continue
+        matching = next((s for s in plan.synonyms if s.keyword.casefold() == kw.casefold()), None)
+        variants = [kw] + (matching.synonyms[:3] if matching else [])
+        group = "(" + " OR ".join(_quote(v) for v in dict.fromkeys(variants) if v.strip()) + ")"
+        if group not in groups:
+            groups.append(group)
+        if len(groups) == 2:
+            break
+    query = " AND ".join(groups) if groups else _quote(plan.topic.strip())
+    terms = region_terms(plan)
+    if terms:
+        region_group = " OR ".join(_quote(t) for t in terms)
+        query = f"({query}) AND ({region_group})"
+    return query

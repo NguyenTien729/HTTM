@@ -79,7 +79,15 @@ async def synthesize_themes(project_id: int) -> SynthesizeResponse:
             detail="Chưa có paper nào được phân tích. Gọi POST /analyze/{project_id} trước.",
         )
 
+    async with get_pool().acquire() as conn:
+        project = await conn.fetchrow("SELECT topic, paper_type FROM research_projects WHERE id=$1", project_id)
+    topic_context = ""
+    if project and project["paper_type"] == "topic_research":
+        topic_context = (f"Đề tài chính xác của project: {project['topic']}. Hướng A: phân tích và tổng hợp "
+                         "bằng chứng theo đúng đề tài này; không phát hiện research gap hoặc đề xuất giả thuyết mới. "
+                         "Chỉ gom nhóm các kết quả liên quan đến biến, đối tượng và quan hệ trong đề tài.\n\n")
     prompt = (
+        topic_context +
         "Dưới đây là danh sách paper đã được phân tích (mỗi dòng 1 paper, có paper_id thật):\n\n"
         f"{_format_analyses_for_prompt(analyses)}\n\n"
         "Hãy gom các paper này thành các theme (nhóm phát hiện chính giống nhau hoặc đối lập nhau). "

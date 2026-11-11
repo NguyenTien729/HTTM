@@ -321,7 +321,7 @@ async def resolve_project_topic(project_id: str | int) -> dict[str, str]:
         pool = get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, topic, research_plan FROM research_projects WHERE id = $1;",
+                "SELECT id, topic, research_plan, paper_type FROM research_projects WHERE id = $1;",
                 numeric_id,
             )
     except DataResearchError:
@@ -359,6 +359,7 @@ async def resolve_project_topic(project_id: str | int) -> dict[str, str]:
         "project_id": str(row["id"]),
         "topic": topic,
         "topic_source": "research_projects.topic",
+        "paper_type": dict(row).get("paper_type", "original_research"),
         "project_title": project_title,
     }
 

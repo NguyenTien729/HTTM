@@ -19,6 +19,7 @@ import re
 import json
 import logging
 from pathlib import Path
+from pydantic import BaseModel, Field
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, HTTPException
@@ -27,7 +28,7 @@ from fastapi.responses import FileResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
 from reportlab.lib.colors import HexColor
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem, Table, TableStyle, PageBreak,
@@ -36,6 +37,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 from app.db import get_pool
+from app.services.vietnamese_writing import vietnamese_prose
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/export", tags=["export"])
@@ -43,6 +45,67 @@ router = APIRouter(prefix="/export", tags=["export"])
 _FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "NotoSans-VF.ttf"
 _FONT_NAME = "VNFont"
 _FONT_REGISTERED = False
+_PAPER_FONT = "PaperSerif"
+
+
+class PaperAuthor(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    affiliation: str = Field(default="", max_length=500)
+    email: str = Field(default="", max_length=200)
+    corresponding: bool = False
+
+
+class PaperExportOptions(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    authors: list[PaperAuthor] = Field(default_factory=list, max_length=30)
+    keywords: list[str] | None = Field(default=None, max_length=10)
+    include_author_notes: bool = False
+
+
+def _paper_styles() -> dict:
+    """Single-column serif journal typography, using bundled OFL fonts."""
+    directory = _FONT_PATH.parent
+    for suffix, filename in (("", "Regular"), ("-Bold", "Bold"), ("-Italic", "Italic"), ("-BoldItalic", "BoldItalic")):
+        name = _PAPER_FONT + suffix
+        if name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(name, str(directory / f"Tinos-{filename}.ttf")))
+    pdfmetrics.registerFontFamily(_PAPER_FONT, normal=_PAPER_FONT, bold=_PAPER_FONT+"-Bold",
+                                  italic=_PAPER_FONT+"-Italic", boldItalic=_PAPER_FONT+"-BoldItalic")
+    styles = _build_styles()
+    for style in styles.values():
+        style.fontName = _PAPER_FONT
+        style.textColor = HexColor("#111111")
+    for key in ("H1", "H2", "AbstractHead", "TableHead", "Title"):
+        styles[key].fontName = _PAPER_FONT + "-Bold"
+    for key in ("H1", "H2", "AbstractHead", "Title"):
+        styles[key].keepWithNext = True
+    styles["Title"].fontSize, styles["Title"].leading = 14, 18
+    styles["Title"].spaceAfter = 8
+    styles["Subtitle"].fontName = _PAPER_FONT + "-Italic"
+    styles["Subtitle"].spaceAfter = 4
+    styles["Body"].fontSize, styles["Body"].leading = 12, 16
+    styles["Body"].firstLineIndent, styles["Body"].spaceAfter = .8*cm, 3
+    styles["Body"].allowWidows = styles["Body"].allowOrphans = False
+    styles["H1"].fontSize, styles["H1"].leading = 12, 16
+    styles["H1"].spaceBefore, styles["H1"].spaceAfter = 10, 4
+    styles["H2"].fontName = _PAPER_FONT + "-BoldItalic"
+    styles["H2"].fontSize, styles["H2"].leading = 11.5, 15
+    styles["H2"].spaceBefore, styles["H2"].spaceAfter = 7, 3
+    styles["Abstract"].fontName = _PAPER_FONT + "-Italic"
+    styles["Abstract"].fontSize, styles["Abstract"].leading = 11, 14.5
+    styles["Abstract"].leftIndent = styles["Abstract"].rightIndent = 0
+    styles["Abstract"].firstLineIndent = .8*cm
+    styles["AbstractHead"].alignment = 0
+    styles["Caption"].fontName = _PAPER_FONT + "-Italic"
+    styles["Caption"].alignment = TA_CENTER
+    styles["Caption"].keepWithNext = True
+    for key in ("TableHead", "TableCell"):
+        styles[key].fontSize, styles[key].leading = 10, 13
+    styles["Reference"].fontSize, styles["Reference"].leading = 10.5, 14
+    styles["Reference"].leftIndent, styles["Reference"].firstLineIndent = 16, -16
+    styles["ArticleType"] = ParagraphStyle("ArticleType", fontName=_PAPER_FONT+"-Bold",
+        fontSize=10, leading=14, alignment=TA_RIGHT, spaceAfter=6, keepWithNext=True)
+    return styles
 
 
 def _ensure_font_registered() -> None:
@@ -135,7 +198,7 @@ async def _load_proposal_data(research_question_id: int) -> dict:
         if rq_row is None:
             raise HTTPException(status_code=404, detail="Không tìm thấy research question.")
 
-        gap_row = await conn.fetchrow("SELECT * FROM gaps WHERE id = $1;", rq_row["gap_id"])
+        gap_row = await conn.fetchrow("SELECT * FROM gaps WHERE id = $1;", rq_row["gap_id"]) if rq_row["gap_id"] is not None else None
         project_row = await conn.fetchrow(
             "SELECT topic FROM research_projects WHERE id = $1;", rq_row["project_id"]
         )
@@ -368,7 +431,7 @@ def _p_clause(value) -> str:
 
 
 def _clean_draft_text(text: str | None) -> str:
-    return (text or "").replace("`", "").strip()
+    return vietnamese_prose(text).replace("`", "").strip()
 
 
 # ---- Đánh số lại citation theo thứ tự xuất hiện (chuẩn bài báo) ------------ #
@@ -471,7 +534,7 @@ def _table_block(caption: str, header: list[str], rows: list[list[str]], widths:
     data = [[Paragraph(_esc(h), styles["TableHead"]) for h in header]]
     for row in rows:
         data.append([Paragraph(_esc(c), styles["TableCell"]) for c in row])
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table = Table(data, colWidths=col_widths, repeatRows=1, splitInRow=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), HexColor("#EDEDED")),
         ("LINEABOVE", (0, 0), (-1, 0), 0.8, HexColor("#333333")),
@@ -537,10 +600,13 @@ def _results_tables(snap: dict, styles: dict) -> list:
             n_tab += 1
         tests = gt.get("tests") or ([gt["test"]] if gt.get("test") else [])
         if tests:
-            rows = [[t["name"], _fmt(t.get("statistic")), _fmt_p(t.get("p_value"))] for t in tests]
+            adjusted = any(t.get("p_value_adjusted") is not None for t in tests)
+            rows = [[t["name"], _fmt(t.get("statistic")), _fmt_p(t.get("p_value"))]
+                    + ([_fmt_p(t.get("p_value_adjusted"))] if adjusted else []) for t in tests]
             flow += _table_block(f"Bảng {n_tab}. Kết quả kiểm định giữa các nhóm",
-                                 ["Phép kiểm định", "Thống kê", "p"], rows, [4, 1.5, 1.2], styles,
-                                 "p-value chưa hiệu chỉnh cho đa kiểm định.")
+                                 ["Phép kiểm định", "Thống kê", "p gốc"] + (["p hiệu chỉnh"] if adjusted else []),
+                                 rows, [4, 1.5, 1.2] + ([1.4] if adjusted else []), styles,
+                                 gt.get("multiplicity", "p-value chưa hiệu chỉnh cho đa kiểm định."))
 
     ols = snap.get("ols_regression")
     if ols and ols.get("status") == "ok":
@@ -559,7 +625,7 @@ def _results_tables(snap: dict, styles: dict) -> list:
 def _build_abstract(rq: dict, snap: dict, disc: dict, conclusion_text: str, assessments: list[dict]) -> str:
     """Abstract có cấu trúc, ráp bằng CODE từ các phần đã có (không gọi LLM)."""
     ds = snap.get("dataset") or {}
-    parts = [f"<b>Mục tiêu.</b> {_esc(rq['rq_text'])}"]
+    parts = [f"<b>Mục tiêu.</b> {_esc(vietnamese_prose(rq['rq_text']))}"]
 
     methods = []
     if ds.get("dataset_id"):
@@ -567,7 +633,12 @@ def _build_abstract(rq: dict, snap: dict, disc: dict, conclusion_text: str, asse
         methods.append(f"phân tích thứ cấp trên bộ dữ liệu công khai {ds['dataset_id']}"
                        + (f" (N = {n:,})" if isinstance(n, int) else ""))
     gt, ols = snap.get("group_test"), snap.get("ols_regression")
-    methods.append("thống kê mô tả và tương quan Pearson")
+    if ds.get("analysis_mode") == "structure_only":
+        methods = ["kiểm tra schema và số bản ghi từ metadata Parquet; chưa phân tích nội dung ảnh hoặc audio"]
+    else:
+        methods.append("thống kê mô tả")
+        if snap.get("top_correlations_pearson"):
+            methods.append("phân tích tương quan Pearson")
     if gt and gt.get("status") == "ok":
         methods.append("kiểm định so sánh nhóm")
     if ols and ols.get("status") == "ok":
@@ -601,12 +672,17 @@ def _prepare_paper(data: dict) -> dict:
     methods_text = _clean_draft_text(snap.get("methods_draft"))
     results_paras = [p.strip() for p in _clean_draft_text(snap.get("results_draft")).split("\n\n") if p.strip()]
     # Câu cuối của results_draft là lời nhắc nội bộ cho người dùng, không phải văn bản bài báo.
-    results_paras = [p for p in results_paras if not p.startswith("Không nên diễn giải p-value")]
+    results_paras = [p for p in results_paras if not p.startswith(("Không nên diễn giải p-value", "Không nên diễn giải giá trị p"))]
 
     d = {k: num.apply(disc[k]) for k in (
         "key_findings_paragraph", "literature_comparison_paragraph", "implications_paragraph",
         "limitations_paragraph", "future_work_paragraph", "conclusion_paragraph")}
     assessments = [{**a, "explanation": num.apply(a["explanation"])} for a in disc["hypothesis_assessments"]]
+    intro_paras = [vietnamese_prose(p) for p in intro_paras]
+    related_themes = [(vietnamese_prose(name), vietnamese_prose(text)) for name, text in related_themes]
+    related_contra, related_gap = vietnamese_prose(related_contra), vietnamese_prose(related_gap)
+    d = {k: vietnamese_prose(value) for k, value in d.items()}
+    assessments = [{**a, "explanation": vietnamese_prose(a["explanation"])} for a in assessments]
 
     ordered_refs = []
     by_id = {p["id"]: p for p in data["references"]}
@@ -626,7 +702,7 @@ def _prepare_paper(data: dict) -> dict:
     if unverified:
         notes.append("Các số sau xuất hiện trong Discussion/Conclusion nhưng KHÔNG khớp số liệu phân tích — "
                      "cần kiểm tra thủ công: " + ", ".join(unverified) + ".")
-    if not methods_text or not snap.get("column_summaries"):
+    if not methods_text or (not snap.get("column_summaries") and snap.get("dataset", {}).get("analysis_mode") != "structure_only"):
         notes.append("Discussion này được lưu từ phiên bản cũ nên thiếu bản Methods/bảng số liệu; "
                      "hãy chạy lại POST /write/discussion để có đủ phần Methods và Results.")
 
@@ -649,44 +725,60 @@ def _page_decorations(canvas, doc) -> None:
 
 def _build_paper_pdf(data: dict, output_path: Path) -> None:
     _ensure_font_registered()
-    styles = _build_styles()
+    styles = _paper_styles()
     paper = _prepare_paper(data)
     rq, disc = data["rq"], data["discussion"]
     snap = paper["snap"]
 
+    title = vietnamese_prose(data.get("article_title") or data.get("project_topic") or rq["rq_text"])
+    authors = data.get("article_authors") or []
     doc = SimpleDocTemplate(
-        str(output_path), pagesize=A4, title=rq["rq_text"][:200],
-        topMargin=2.2 * cm, bottomMargin=2.2 * cm, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+        str(output_path), pagesize=A4, title=title[:200],
+        author=", ".join(a["name"] for a in authors),
+        topMargin=2.5 * cm, bottomMargin=2.2 * cm, leftMargin=2.2 * cm, rightMargin=2.2 * cm,
     )
     story: list = []
     P = lambda text, style="Body": Paragraph(_esc(text), styles[style])  # noqa: E731
 
     # ---- Tiêu đề + Abstract + Keywords ----
-    story.append(P(rq["rq_text"], "Title"))
-    story.append(P(f"Đề tài: {data['project_topic']}", "Subtitle"))
-    story.append(Paragraph("Abstract (Tóm tắt)", styles["AbstractHead"]))
-    story.append(Paragraph(paper["abstract"], styles["Abstract"]))
+    story.append(P("Bài báo nghiên cứu", "ArticleType"))
+    story.append(P(title.upper(), "Title"))
+    if authors:
+        affiliations = list(dict.fromkeys(a.get("affiliation") for a in authors if a.get("affiliation")))
+        names = []
+        for a in authors:
+            marker = str(affiliations.index(a["affiliation"])+1) if a.get("affiliation") else ""
+            marker += "*" if a.get("corresponding") else ""
+            names.append(_esc(a["name"]) + (f"<super>{marker}</super>" if marker else ""))
+        story.append(Paragraph("<b>" + ", ".join(names) + "</b>", styles["Subtitle"]))
+        for i, affiliation in enumerate(affiliations, 1):
+            story.append(P(f"{i}. {affiliation}", "Subtitle"))
+        for a in authors:
+            if a.get("corresponding") and a.get("email"):
+                story.append(P(f"*Tác giả liên hệ: {a['name']} – Email: {a['email']}", "Subtitle"))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("TÓM TẮT", styles["AbstractHead"]))
+    abstract = re.sub(r"<b>(?:Mục tiêu|Phương pháp|Kết quả|Kết luận)\.</b>\s*", "", paper["abstract"]).replace("<br/>", " ")
+    story.append(Paragraph(abstract, styles["Abstract"]))
     if data.get("keywords"):
         story.append(Paragraph("<b>Từ khoá:</b> " + _esc(", ".join(data["keywords"])), styles["Abstract"]))
 
     # ---- 1. Introduction ----
-    story.append(P("1. Giới thiệu (Introduction)", "H1"))
+    story.append(P("1. Mở đầu", "H1"))
     for text in paper["intro"]:
         story.append(P(text))
 
     # ---- 2. Related Work ----
-    story.append(P("2. Tổng quan tài liệu (Related Work)", "H1"))
-    for name, text in paper["related_themes"]:
-        story.append(P(name, "H2"))
+    story.append(P("2. Tổng quan nghiên cứu và cơ sở lí luận", "H1"))
+    for i, (name, text) in enumerate(paper["related_themes"], 1):
+        story.append(P(f"2.{i}. {name}", "H2"))
         story.append(P(text))
-    story.append(P("Mâu thuẫn giữa các nghiên cứu", "H2"))
     story.append(P(paper["related_contra"]))
-    story.append(P("Khoảng trống nghiên cứu", "H2"))
     story.append(P(paper["related_gap"]))
 
     # ---- 3. RQ & giả thuyết ----
-    story.append(P("3. Câu hỏi nghiên cứu và giả thuyết", "H1"))
-    story.append(Paragraph("<b>RQ:</b> " + _esc(rq["rq_text"]), styles["Body"]))
+    story.append(P("3. Câu hỏi nghiên cứu và giả thuyết" if rq.get("hypotheses") else "3. Câu hỏi nghiên cứu", "H1"))
+    story.append(Paragraph("<b>Câu hỏi nghiên cứu:</b> " + _esc(vietnamese_prose(rq["rq_text"])), styles["Body"]))
     if rq["is_quantitative"] and rq["variables"]:
         story.append(P("Biến số", "H2"))
         story.append(ListFlowable(
@@ -698,10 +790,10 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
             story.append(Paragraph(f"<b>{_esc(h['label'])}:</b> {_esc(h['statement'])}", styles["Body"]))
 
     # ---- 4. Methods ----
-    story.append(P("4. Phương pháp (Methods)", "H1"))
+    story.append(P("4. Phương pháp nghiên cứu", "H1"))
     ds = snap.get("dataset") or {}
     if paper["methods"]:
-        story.append(P("Dữ liệu và quy trình phân tích", "H2"))
+        story.append(P("4.1. Dữ liệu và quy trình phân tích", "H2"))
         story.append(P(paper["methods"]))
     if ds.get("source_url"):
         story.append(P(f"Nguồn dữ liệu: {ds['source_url']}"))
@@ -710,42 +802,42 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
                        f"số dòng được phân tích: {ds.get('rows_analyzed', 0):,}."))
 
     # ---- 5. Results ----
-    story.append(P("5. Kết quả (Results)", "H1"))
+    story.append(P("5. Kết quả nghiên cứu", "H1"))
     for text in paper["results_paras"]:
         story.append(P(text))
-    story.extend(_results_tables(snap, styles))
+    result_tables = _results_tables(snap, styles)
+    story.extend(result_tables)
+    table_count = sum(isinstance(item, Paragraph) and item.style is styles["Caption"] for item in result_tables)
 
     # ---- 6. Discussion ----
     d = paper["discussion"]
-    story.append(P("6. Thảo luận (Discussion)", "H1"))
-    story.append(P("Diễn giải kết quả chính", "H2"))
+    story.append(P("6. Thảo luận", "H1"))
+    story.append(P("6.1. Diễn giải kết quả và đối chiếu nghiên cứu trước", "H2"))
     story.append(P(d["key_findings_paragraph"]))
-    story.append(P("So sánh với các nghiên cứu trước", "H2"))
     story.append(P(d["literature_comparison_paragraph"]))
     if paper["assessments"]:
         story.append(P("Đánh giá các giả thuyết", "H2"))
         stmt = {h["label"]: h["statement"] for h in rq["hypotheses"]}
         rows = [[a["label"], stmt.get(a["label"], ""), _VERDICT_VI.get(a["verdict"], a["verdict"]), a["explanation"]]
                 for a in paper["assessments"]]
-        story.extend(_table_block("Bảng tổng hợp đánh giá giả thuyết",
+        story.extend(_table_block(f"Bảng {table_count + 1}. Tổng hợp đánh giá giả thuyết",
                                   ["Giả thuyết", "Phát biểu", "Kết luận", "Giải thích"], rows, [1, 3, 1.6, 4], styles))
-    story.append(P("Ý nghĩa của nghiên cứu", "H2"))
+    story.append(P("6.2. Ý nghĩa của nghiên cứu", "H2"))
     story.append(P(d["implications_paragraph"]))
-    story.append(P("Hạn chế", "H2"))
+    story.append(P("6.3. Hạn chế và hướng nghiên cứu tiếp theo", "H2"))
     story.append(P(d["limitations_paragraph"]))
     tech_limits = snap.get("limitations_from_analysis") or []
     if tech_limits:
         story.append(ListFlowable(
             [ListItem(Paragraph(_esc(t), styles["Body"])) for t in tech_limits], bulletType="bullet"))
-    story.append(P("Hướng nghiên cứu tiếp theo", "H2"))
     story.append(P(d["future_work_paragraph"]))
 
     # ---- 7. Conclusion ----
-    story.append(P("7. Kết luận (Conclusion)", "H1"))
+    story.append(P("7. Kết luận", "H1"))
     story.append(P(d["conclusion_paragraph"]))
 
     # ---- References (đánh số theo thứ tự xuất hiện) ----
-    story.append(P("Tài liệu tham khảo (References)", "H1"))
+    story.append(P("TÀI LIỆU THAM KHẢO", "H1"))
     if paper["references"]:
         for n, ref in paper["references"]:
             story.append(P(_format_reference(ref, label=n), "Reference"))
@@ -753,12 +845,29 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
         story.append(P("(Bài không có citation hợp lệ.)"))
 
     # ---- Ghi chú dành cho tác giả (trang cuối) ----
-    story.append(PageBreak())
-    story.append(P("Ghi chú dành cho tác giả (xoá trang này trước khi nộp)", "H1"))
-    story.append(ListFlowable(
-        [ListItem(Paragraph(_esc(n), styles["Body"])) for n in paper["notes"]], bulletType="bullet"))
+    if data.get("include_author_notes"):
+        story.append(PageBreak())
+        story.append(P("Ghi chú dành cho tác giả", "H1"))
+        story.extend(P(n) for n in paper["notes"])
 
-    doc.build(story, onFirstPage=_page_decorations, onLaterPages=_page_decorations)
+    def decorate(canvas, document):
+        canvas.saveState()
+        canvas.setFont(_PAPER_FONT, 9)
+        canvas.setFillColor(HexColor("#333333"))
+        canvas.drawCentredString(A4[0]/2, 1.2*cm, str(document.page))
+        if document.page > 1:
+            heading = title
+            reserved = pdfmetrics.stringWidth("Bài báo nghiên cứu", _PAPER_FONT, 9) + 18
+            while pdfmetrics.stringWidth(heading + "…", _PAPER_FONT, 9) > document.width - reserved:
+                heading = heading[:-2]
+            if heading != title:
+                heading += "…"
+            canvas.drawString(document.leftMargin, A4[1]-1.6*cm, heading)
+            canvas.drawRightString(A4[0]-document.rightMargin, A4[1]-1.6*cm, "Bài báo nghiên cứu")
+            canvas.setLineWidth(.4)
+            canvas.line(document.leftMargin, A4[1]-1.8*cm, A4[0]-document.rightMargin, A4[1]-1.8*cm)
+        canvas.restoreState()
+    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
 
 
 @router.post("/proposal/{research_question_id}")
@@ -786,10 +895,16 @@ async def export_proposal_pdf(research_question_id: int):
 
 
 @router.post("/paper/{research_question_id}")
-async def export_paper_pdf(research_question_id: int):
+async def export_paper_pdf(research_question_id: int, options: PaperExportOptions | None = None):
     """Xuất bài báo hoàn chỉnh (IMRaD) cho 1 research question đã có Introduction, Related Work
     và Discussion/Conclusion (kèm kết quả phân tích dữ liệu)."""
     data = await _load_paper_data(research_question_id)
+    if options:
+        data["article_title"] = options.title
+        data["article_authors"] = [a.model_dump() for a in options.authors]
+        data["include_author_notes"] = options.include_author_notes
+        if options.keywords is not None:
+            data["keywords"] = options.keywords
 
     output_dir = Path("/tmp/research_copilot_exports")
     output_dir.mkdir(parents=True, exist_ok=True)

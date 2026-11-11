@@ -14,6 +14,8 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Literal
 
 from app.models import ResearchPlanRequest, ResearchPlanResponse, ResearchPlan
 from app.db import get_pool
@@ -23,12 +25,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plan", tags=["planner"])
 
 
+class PaperTypeChange(BaseModel):
+    paper_type: Literal["topic_research", "review", "original_research"]
+
+
+@router.patch("/{project_id}/paper-type")
+async def change_paper_type(project_id: int, request: PaperTypeChange):
+    """Switch workflow without deleting source papers or existing manuscripts."""
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("UPDATE research_projects SET paper_type=$2 WHERE id=$1 RETURNING id, paper_type", project_id, request.paper_type)
+    if not row:
+        raise HTTPException(404, "Không tìm thấy research project.")
+    return dict(row)
+
+
 async def generate_research_plan(payload: ResearchPlanRequest) -> ResearchPlan:
     """Gọi LLM, ép trả JSON đúng schema ResearchPlan, trả về object đã validate."""
     prompt = (
         f"Chủ đề nghiên cứu: {payload.topic}\n"
         f"Ngôn ngữ mong muốn cho tài liệu: {payload.language}\n"
         f"Loại nghiên cứu mong muốn: {payload.study_type or 'không chỉ định'}\n"
+        f"Loại bản thảo: {payload.paper_type}. Nếu review: lập kế hoạch tổng quan bằng chứng, "
+        "không yêu cầu khảo sát/dataset mới; các study_types là loại tài liệu được tìm, không giới hạn chỉ tìm bài review.\n"
+        "Nếu topic_research: nghiên cứu dữ liệu thứ cấp bám đúng topic, không phát hiện gap, "
+        "không chuyển sang câu hỏi từ khoảng trống, không khẳng định đã tạo kết quả hoặc giả thuyết mới.\n"
         f"Số lượng paper mục tiêu: {payload.target_paper_count}\n"
         f"Journal/conference mục tiêu: {payload.target_venue or 'không chỉ định'}\n"
         f"Quốc gia/khu vực bắt buộc: {payload.region or 'không chỉ định (suy ra từ topic nếu có)'}\n\n"
@@ -53,15 +73,16 @@ async def create_plan(payload: ResearchPlanRequest) -> ResearchPlanResponse:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO research_projects (topic, research_plan)
-            VALUES ($1, $2::jsonb)
+            INSERT INTO research_projects (topic, research_plan, paper_type)
+            VALUES ($1, $2::jsonb, $3)
             RETURNING id;
             """,
             payload.topic,
             json.dumps(plan.model_dump()),
+            payload.paper_type,
         )
 
-    return ResearchPlanResponse(id=row["id"], plan=plan)
+    return ResearchPlanResponse(id=row["id"], plan=plan, paper_type=payload.paper_type)
 
 
 @router.get("/{project_id}", response_model=ResearchPlanResponse)
@@ -70,12 +91,13 @@ async def get_plan(project_id: int) -> ResearchPlanResponse:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, research_plan FROM research_projects WHERE id = $1;",
+            "SELECT id, research_plan, paper_type FROM research_projects WHERE id = $1;",
             project_id,
         )
 
     if row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy research project.")
 
-    plan = ResearchPlan.model_validate(json.loads(row["research_plan"]))
-    return ResearchPlanResponse(id=row["id"], plan=plan)
+    value = row["research_plan"]
+    plan = ResearchPlan.model_validate(json.loads(value) if isinstance(value, str) else value)
+    return ResearchPlanResponse(id=row["id"], plan=plan, paper_type=row["paper_type"])

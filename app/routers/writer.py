@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException
 from app.models import Introduction, IntroductionExtraction, WriteIntroductionResponse
 from app.db import get_pool
 from app.services.llm import generate_structured
+from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/write/introduction", tags=["scientific-writer"])
@@ -41,14 +42,15 @@ async def _load_research_question(rq_id: int) -> dict:
         if rq_row is None:
             raise HTTPException(status_code=404, detail="Không tìm thấy research question.")
 
-        gap_row = await conn.fetchrow("SELECT * FROM gaps WHERE id = $1;", rq_row["gap_id"])
+        gap_row = await conn.fetchrow("SELECT * FROM gaps WHERE id = $1;", rq_row["gap_id"]) if rq_row["gap_id"] is not None else None
         project_row = await conn.fetchrow(
             "SELECT topic FROM research_projects WHERE id = $1;", rq_row["project_id"]
         )
 
     data = dict(rq_row)
     data["gap_description"] = gap_row["description"] if gap_row else ""
-    data["gap_type"] = gap_row["gap_type"] if gap_row else ""
+    data["gap_type"] = gap_row["gap_type"] if gap_row else "topic"
+    data["research_basis"] = "research_gap" if gap_row else "project_topic"
     data["project_topic"] = project_row["topic"] if project_row else ""
     return data
 
@@ -116,6 +118,11 @@ async def write_introduction(research_question_id: int) -> WriteIntroductionResp
     themes_text = await _load_themes_text(project_id)
 
     prompt = (
+        VIETNAMESE_WRITING_RULE +
+        ("Câu hỏi này thuộc hướng A, nghiên cứu trực tiếp đề tài, không có gap đã phát hiện. "
+         "Không tự tạo hoặc khẳng định khoảng trống/tính mới; trường research_gap_statement trình bày "
+         "mục tiêu và phạm vi nghiên cứu. Đóng góp dự kiến là phân tích dữ liệu theo đề tài, chưa phải kết quả đã đạt.\n"
+         if rq.get("research_basis") == "project_topic" else "") +
         f"Đề tài nghiên cứu: {rq['project_topic']}\n"
         f"Research question: {rq['rq_text']}\n"
         f"Research gap liên quan ({rq['gap_type']}): {rq['gap_description']}\n\n"

@@ -40,6 +40,7 @@ from app.models import (
 )
 from app.db import get_pool
 from app.services.llm import generate_structured
+from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 # Dùng lại helper của Related Work để không lệch logic (chỉ đọc, không sửa file đó).
 from app.routers.related_work import (
     _load_research_question,
@@ -83,6 +84,9 @@ def _compact_analysis(result: dict[str, Any]) -> dict[str, Any]:
         "dataset": {k: dataset.get(k) for k in (
             "dataset_id", "config", "split", "source_url", "rows_in_selected_split",
             "rows_analyzed", "sampled", "sampling_method",
+            "analysis_mode", "content_analyzed", "excluded_columns",
+            "research_topic", "research_basis",
+            "source", "doi", "filename", "source_description",
         ) if dataset.get(k) is not None},
         "overview": {
             "rows_analyzed": overview.get("rows_analyzed"),
@@ -96,6 +100,7 @@ def _compact_analysis(result: dict[str, Any]) -> dict[str, Any]:
         "group_test": result.get("group_test"),
         "ols_regression": result.get("ols_regression"),
         "limitations_from_analysis": result.get("limitations") or [],
+        "analysis_plan": result.get("analysis_plan"),
     }
 
 
@@ -172,8 +177,13 @@ def _format_literature(themes: list[dict]) -> str:
 
 def _discussion_prompt(rq: dict, themes: list[dict], analysis_json: str) -> str:
     return (
+        VIETNAMESE_WRITING_RULE +
+        f"Đề tài project: {rq.get('project_topic', '')}\n"
         f"Research question: {rq['rq_text']}\n"
-        f"Research gap ({rq['gap_type']}): {rq['gap_description']}\n\n"
+        f"Cơ sở và phạm vi ({rq['gap_type']}): {rq['gap_description']}\n\n" +
+        ("Hướng A nghiên cứu trực tiếp đề tài project, không có gap hoặc giả thuyết mới. "
+         "Chỉ bàn luận câu hỏi nghiên cứu theo dữ liệu thực tế; để hypothesis_assessments rỗng.\n"
+         if rq.get("research_basis") == "project_topic" else "") +
         f"GIẢ THUYẾT cần đánh giá:\n{_format_hypotheses(rq)}\n\n"
         f"KẾT QUẢ PHÂN TÍCH DỮ LIỆU (nguồn số liệu DUY NHẤT — mọi con số bạn viết phải lấy "
         f"nguyên từ đây, không tự tính thêm, không làm tròn khác đi, không bịa):\n{analysis_json}\n\n"
@@ -188,16 +198,21 @@ def _discussion_prompt(rq: dict, themes: list[dict], analysis_json: str) -> str:
         "và nói rõ trong hạn chế.\n"
         "2. Tương quan/hồi quy/kiểm định nhóm KHÔNG chứng minh quan hệ nhân quả; không dùng từ 'gây ra', "
         "'dẫn đến' cho quan hệ thống kê.\n"
-        "3. p-value chưa hiệu chỉnh đa kiểm định; không nhấn mạnh 'có ý nghĩa' cho kết quả chỉ vừa qua ngưỡng.\n"
+        "3. Phân biệt p-value gốc và p_value_adjusted nếu có; không nhấn mạnh 'có ý nghĩa' cho kết quả chỉ vừa qua ngưỡng.\n"
         "4. Nếu phép kiểm định/hồi quy có status not_run hoặc vắng mặt, nói thẳng là chưa thực hiện được, "
         "không suy đoán kết quả.\n"
-        "5. Nếu kết quả khác literature, nêu sự khác biệt thay vì ép cho nhất quán."
+        "5. Nếu kết quả khác literature, nêu sự khác biệt thay vì ép cho nhất quán.\n"
+        "6. Nếu analysis_mode=structure_only, chỉ có schema/số bản ghi từ metadata Parquet: "
+        "không có phân tích nội dung ảnh/audio hoặc kết quả kiểm định. Mọi giả thuyết phải có "
+        "verdict=not_tested. Không coi số bản ghi trong split là số quan sát đã phân tích; "
+        "Conclusion phải nói chưa đủ bằng chứng để trả lời câu hỏi nghiên cứu."
     )
 
 
 def _conclusion_prompt(rq: dict, discussion: DiscussionExtraction) -> str:
     verdicts = "; ".join(f"{a.label}={a.verdict}" for a in discussion.hypothesis_assessments) or "không có giả thuyết"
     return (
+        VIETNAMESE_WRITING_RULE +
         f"Research question: {rq['rq_text']}\n\n"
         f"Tóm tắt Discussion đã viết:\n"
         f"- Kết quả chính: {discussion.key_findings_paragraph}\n"
@@ -247,6 +262,8 @@ async def write_discussion(
     discussion = await generate_structured(
         _discussion_prompt(rq, themes, analysis_json), DiscussionExtraction
     )
+    if rq.get("research_basis") == "project_topic":
+        discussion.hypothesis_assessments = []
     conclusion = await generate_structured(
         _conclusion_prompt(rq, discussion), ConclusionExtraction
     )

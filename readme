@@ -7,6 +7,10 @@ docker compose up -d --build
 
 http://127.0.0.1:8000/docs
 
+Luồng hướng A/B hiện tại: README_WORKFLOWS.md
+Mở /ui/, chọn "Hướng A — nghiên cứu theo đề tài" để bỏ gap, tạo câu hỏi theo topic rồi tìm và phân tích dataset.
+Luồng bài tổng quan riêng trước đây: README_REVIEW_WORKFLOW.md
+
 {
   "topic": "Tác động của AI đến năng suất sinh viên đại học",
   "language": "vi",

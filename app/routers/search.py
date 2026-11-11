@@ -95,6 +95,7 @@ async def run_search(project_id: int) -> SearchResponse:
     # Reuse decisions between expanding windows; no repeated LLM charge for a paper.
     screened: dict[str, tuple[Paper, int]] = {}
     rejected: set[str] = set()
+    windows = []
 
     for start_year in window_steps(plan.search_strategy.date_range, today):
         try:
@@ -103,6 +104,7 @@ async def run_search(project_id: int) -> SearchResponse:
             logger.exception("Paper provider failed")
             raise HTTPException(status_code=502, detail="Không gọi được OpenAlex API.") from exc
         candidates = _fresh_and_region(raw, plan, start_year, today)
+        windows.append({"from_year": start_year, "to_date": today.isoformat(), "retrieved": len(raw), "after_date_region_filter": len(candidates)})
         fresh: list[Paper] = []
         for p in candidates:
             key = p.doi.lower().strip() if p.doi else p.title.casefold().strip()
@@ -128,6 +130,15 @@ async def run_search(project_id: int) -> SearchResponse:
             break
 
     saved = await _save_papers(selected)
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO literature_search_runs(project_id, audit) VALUES ($1, $2::jsonb)",
+            project_id, json.dumps({"query": query, "search_date": today.isoformat(), "windows": windows,
+                "sources_requested": ["OpenAlex"] + (["Semantic Scholar"] if os.environ.get("ENABLE_SEMANTIC_SCHOLAR", "1") != "0" else []),
+                "selected": len(selected), "newly_saved": saved, "selected_dois": [p.doi for p in selected if p.doi],
+                "selected_titles": [p.title for p in selected], "region": plan.region,
+                "screening": "LLM topic-concept screening against title/abstract; automated selection, not independent human screening"}),
+        )
     return SearchResponse(project_id=project_id, query_used=query, found=len(selected), saved=saved, papers=selected)
 
 

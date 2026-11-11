@@ -57,7 +57,7 @@ def test_extract_topic_prefers_planner_research_topic_over_generic_title():
     assert title == "Research project 7"
 
 
-def test_discover_uses_the_selected_gap_not_the_project_topic(monkeypatch):
+def test_discover_uses_persisted_project_topic_with_selected_gap(monkeypatch):
     import asyncio
     from app.data_research import router as router_module
 
@@ -81,12 +81,13 @@ def test_discover_uses_the_selected_gap_not_the_project_topic(monkeypatch):
         calls["max_search_seconds"] = max_search_seconds
         return {"input_source": "selected_research_gap", "gap": gap, "count": 0, "datasets": []}
 
-    async def should_not_load_topic(*args, **kwargs):
-        raise AssertionError("Dataset discovery must not load or search the broad project topic")
+    async def load_topic(project_id):
+        calls["topic_project"] = str(project_id)
+        return {"topic": "Vietnamese SMS spam detection"}
 
     monkeypatch.setattr(router_module, "resolve_selected_gap", fake_resolve_gap)
     monkeypatch.setattr(router_module, "discover_gap_datasets", fake_discover_gap_datasets)
-    monkeypatch.setattr(router_module, "resolve_project_topic", should_not_load_topic)
+    monkeypatch.setattr(router_module, "resolve_project_topic", load_topic)
 
     request = router_module.DiscoverRequest(
         project_id="42", gap_id="9", limit=5, max_search_seconds=45
@@ -94,7 +95,8 @@ def test_discover_uses_the_selected_gap_not_the_project_topic(monkeypatch):
     result = asyncio.run(router_module.discover(request))
 
     assert calls["resolve"] == ("42", "9")
-    assert calls["gap"] == selected_gap
+    assert calls["gap"] == selected_gap | {"project_topic": "Vietnamese SMS spam detection"}
+    assert calls["topic_project"] == "42"
     assert calls["limit"] == 5
     assert calls["max_search_seconds"] == 45
     assert result["input_source"] == "selected_research_gap"
@@ -126,16 +128,10 @@ def test_discover_requires_project_id():
         raise AssertionError("Discover must require project_id")
 
 
-def test_discover_requires_gap_id():
-    from pydantic import ValidationError
+def test_discover_accepts_project_without_gap_id():
     from app.data_research import router as router_module
 
-    try:
-        router_module.DiscoverRequest(project_id="42")
-    except ValidationError:
-        pass
-    else:
-        raise AssertionError("Discover must require the selected gap_id")
+    assert router_module.DiscoverRequest(project_id="42").gap_id is None
 
 
 def test_resolve_selected_gap_checks_project_ownership(monkeypatch):

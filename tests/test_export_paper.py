@@ -91,3 +91,61 @@ def test_build_paper_pdf_creates_file_with_special_chars(tmp_path: Path):
     out = tmp_path / "paper.pdf"
     _build_paper_pdf(sample_data(), out)
     assert out.exists() and out.read_bytes()[:4] == b"%PDF"
+
+
+def test_journal_layout_has_real_serif_weights_and_optional_author_notes(tmp_path):
+    import pymupdf
+    data = sample_data()
+    data.update(article_title="Ứng dụng AI trong học tập: nghiên cứu khám phá",
+                article_authors=[{"name": "Tác giả minh họa", "affiliation": "Đơn vị nghiên cứu",
+                                  "email": "author@example.org", "corresponding": True}])
+    path = tmp_path / "journal.pdf"
+    _build_paper_pdf(data, path)
+    with pymupdf.open(path) as document:
+        text = "\n".join(page.get_text() for page in document)
+        first = document[0].get_text()
+        assert data["article_title"].upper() in first
+        assert "Tác giả minh họa" in first
+        assert "author@example.org" in first
+        assert "TÓM TẮT" in first
+        assert "Ghi chú dành cho tác giả" not in text
+        assert "Đề tài:" not in first
+        assert "TÀI LIỆU THAM KHẢO" in text
+        fonts = {span["font"] for page in document for block in page.get_text("dict")["blocks"]
+                 if "lines" in block for line in block["lines"] for span in line["spans"]}
+        assert any("Tinos-Bold" in font for font in fonts)
+        assert any("Tinos-Italic" in font for font in fonts)
+        for page in document:
+            for word in page.get_text("words"):
+                assert 0 <= word[0] < word[2] <= page.rect.width
+                assert 0 <= word[1] < word[3] <= page.rect.height
+    data["include_author_notes"] = True
+    _build_paper_pdf(data, path)
+    with pymupdf.open(path) as document:
+        assert "Ghi chú dành cho tác giả" in document[-1].get_text()
+
+
+def test_metadata_only_abstract_does_not_claim_pearson_analysis():
+    data = sample_data()
+    snapshot = data["discussion"]["analysis_snapshot"]
+    snapshot["dataset"]["analysis_mode"] = "structure_only"
+    snapshot["dataset"]["rows_analyzed"] = 0
+    snapshot["column_summaries"] = {}
+    snapshot["top_correlations_pearson"] = []
+    snapshot["group_test"] = snapshot["ols_regression"] = None
+    paper = _prepare_paper(data)
+    assert "tương quan Pearson" not in paper["abstract"]
+    assert "metadata Parquet" in paper["abstract"]
+    assert not any("phiên bản cũ" in note for note in paper["notes"])
+
+
+def test_export_translates_prose_but_preserves_reference_titles_and_identifiers():
+    from app.services.vietnamese_writing import vietnamese_prose
+    data = sample_data()
+    data["introduction"]["background"] = "Literature đã chỉ ra kết quả [40]; literature về research gap còn hạn chế."
+    data["references"][1]["title"] = "Literature review of datasets"
+    paper = _prepare_paper(data)
+    assert paper["intro"][0] == "Các nghiên cứu trước đã chỉ ra kết quả [1]; các nghiên cứu trước về khoảng trống nghiên cứu còn hạn chế."
+    assert paper["references"][0][1]["title"] == "Literature review of datasets"
+    text = "Dataset `dataset` ở owner/dataset: https://example.org/dataset; evidence [12]."
+    assert vietnamese_prose(text) == "Bộ dữ liệu `dataset` ở owner/dataset: https://example.org/dataset; bằng chứng [12]."

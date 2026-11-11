@@ -4,11 +4,12 @@ LLM luôn phải trả về đúng ResearchPlan (ép bằng tool-calling ở pla
 không được trả văn bản tự do.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 
 class ResearchPlanRequest(BaseModel):
+    paper_type: Literal["topic_research", "review", "original_research"] = "original_research"
     topic: str = Field(..., description="Chủ đề nghiên cứu, ví dụ: 'Tác động của AI đến năng suất sinh viên'")
     language: str = Field(default="vi", description="Ngôn ngữ mong muốn cho papers: vi/en/...")
     study_type: Optional[str] = Field(
@@ -51,6 +52,7 @@ class ResearchPlan(BaseModel):
 class ResearchPlanResponse(BaseModel):
     id: int
     plan: ResearchPlan
+    paper_type: Literal["topic_research", "review", "original_research"] = "original_research"
 
 
 # ---- Module Literature Search (V1→V2) ----
@@ -219,7 +221,7 @@ class ResearchQuestion(BaseModel):
     """Kết quả sinh RQ — khớp cột bảng `research_questions`."""
     id: Optional[int] = None
     project_id: int
-    gap_id: int
+    gap_id: Optional[int] = None
     rq_text: str
     feasibility_score: int
     feasibility_notes: str
@@ -232,7 +234,7 @@ class ResearchQuestion(BaseModel):
 
 class GenerateRQResponse(BaseModel):
     project_id: int
-    gap_id: int
+    gap_id: Optional[int] = None
     research_question: ResearchQuestion
 
 

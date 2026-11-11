@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,10 +20,10 @@ router = APIRouter(prefix="/data-research", tags=["Data Research"])
 
 
 class DiscoverRequest(BaseModel):
-    """Search datasets for one explicitly selected Research Gap."""
+    """Search using a persisted project and an optional selected research gap."""
 
     project_id: str | int = Field(..., description="Project chứa research gap được chọn")
-    gap_id: str | int = Field(..., description="ID của research gap người dùng đã chọn")
+    gap_id: str | int | None = Field(default=None, description="Tùy chọn: gap bổ sung cho chủ đề project")
     limit: int = Field(default=10, ge=1, le=20, description="Số dataset phù hợp cần tìm")
     max_search_seconds: int = Field(
         default=60,
@@ -32,7 +32,7 @@ class DiscoverRequest(BaseModel):
         description="Tổng thời gian tối đa cho mở rộng từ khóa và tìm kiếm (5-180 giây)",
     )
 
-    # Reject old topic-only requests: a gap_id is required by design.
+    # Do not allow a manually supplied topic to override the stored project.
     model_config = ConfigDict(extra="forbid")
 
 
@@ -56,6 +56,9 @@ class AnalyzeRequest(BaseModel):
     target_column: str | None = Field(default=None, max_length=200)
     group_column: str | None = Field(default=None, max_length=200)
     predictor_columns: list[str] = Field(default_factory=list, max_length=10)
+    gap_id: str | int | None = None
+    column_roles: dict[str, Literal["identifier", "categorical", "continuous", "text", "datetime"]] = Field(default_factory=dict)
+    correlation_columns: list[str] | None = Field(default=None, max_length=20)
 
 
 def _raise_api_error(exc: DataResearchError) -> None:
@@ -71,16 +74,16 @@ async def get_project_topic(project_id: str) -> dict[str, str]:
         _raise_api_error(exc)
 
 
-@router.post("/discover", summary="Tìm dataset gần nghĩa theo research gap đã chọn")
+@router.post("/discover", summary="Tìm dataset theo chủ đề project và research gap")
 async def discover(request: DiscoverRequest) -> dict[str, Any]:
-    """Search using the selected gap, stopping at the requested count or deadline.
-
-    The project's broad topic is intentionally not passed into dataset discovery.
-    """
+    """The persisted project topic is authoritative; the selected gap is context."""
     try:
-        selected_gap = await resolve_selected_gap(request.project_id, request.gap_id)
+        project = await resolve_project_topic(request.project_id)
+        selected_gap = (await resolve_selected_gap(request.project_id, request.gap_id)
+                        if request.gap_id is not None and project.get("paper_type") != "topic_research"
+                        else {"project_id": project["project_id"], "description": project["topic"]})
         result = await discover_gap_datasets(
-            gap=selected_gap,
+            gap=selected_gap | {"project_topic": project["topic"]},
             limit=request.limit,
             max_search_seconds=request.max_search_seconds,
         )
@@ -115,24 +118,39 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             detail="Chưa được phân tích: hãy gọi /inspect, kiểm tra dataset, rồi gửi lại confirm_dataset=true nếu đồng ý chọn dataset này.",
         )
     try:
+        if request.gap_id is not None and request.project_id is None:
+            raise DataResearchError("gap_id yêu cầu project_id.", 422)
+        project_context = await resolve_project_topic(request.project_id) if request.project_id is not None else None
+        selected_gap = (await resolve_selected_gap(request.project_id, request.gap_id)
+                        if request.gap_id is not None and (project_context or {}).get("paper_type") != "topic_research" else None)
         frame, metadata = await download_dataset_dataframe(
             dataset_id=request.dataset_id,
             config=request.config,
             split=request.split,
             max_rows=request.max_rows,
         )
-        if request.project_id is not None:
-            project_context = await resolve_project_topic(request.project_id)
+        if project_context is not None:
             metadata["project_id"] = project_context["project_id"]
             metadata["research_topic"] = project_context["topic"]
             metadata["topic_source"] = project_context["topic_source"]
             metadata["project_title"] = project_context.get("project_title", "")
+            metadata["research_basis"] = "project_topic" if project_context.get("paper_type") == "topic_research" else "research_gap"
+            if project_context.get("paper_type") == "topic_research" and metadata.get("analysis_mode") == "structure_only":
+                raise DataResearchError("Dataset này chỉ có metadata, chưa có biến để phân tích theo đề tài. Hãy chọn dataset có dữ liệu và biến đo phù hợp; chưa thể viết kết luận thực nghiệm từ metadata.", 422)
+        if selected_gap is not None:
+            metadata["research_gap"] = selected_gap
+        options = {}
+        if request.column_roles:
+            options["column_roles"] = request.column_roles
+        if request.correlation_columns is not None:
+            options["correlation_columns"] = request.correlation_columns
         return analyze_dataframe(
             frame=frame,
             dataset_meta=metadata,
             target_column=request.target_column,
             group_column=request.group_column,
             predictor_columns=request.predictor_columns,
+            **options,
         )
     except DataResearchError as exc:
         _raise_api_error(exc)

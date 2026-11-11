@@ -14,6 +14,7 @@ pandas>=2.2,<4
 numpy>=1.26,<3
 scipy>=1.13,<2
 pyarrow>=17,<30
+openpyxl>=3.1,<4
 
 # Data Research module
 SQLAlchemy>=1.4,<3

@@ -87,6 +87,28 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             """
         )
 
+        await conn.execute("ALTER TABLE research_projects ADD COLUMN IF NOT EXISTS paper_type TEXT NOT NULL DEFAULT 'original_research';")
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS literature_search_runs (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                audit JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );"""
+        )
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS review_manuscripts (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                manuscript JSONB NOT NULL,
+                validation JSONB NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS review_manuscripts_project_idx ON review_manuscripts(project_id, id);
+            """
+        )
+
         # paper_analyses: kết quả phân tích 1 paper (rút gọn — chỉ dựa trên abstract,
         # chưa đọc full-text PDF). 1 paper chỉ có tối đa 1 analysis (unique paper_id).
         await conn.execute(
@@ -145,7 +167,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             CREATE TABLE IF NOT EXISTS research_questions (
                 id                  SERIAL PRIMARY KEY,
                 project_id          INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
-                gap_id              INTEGER NOT NULL REFERENCES gaps(id) ON DELETE CASCADE,
+                gap_id              INTEGER REFERENCES gaps(id) ON DELETE CASCADE,
                 rq_text             TEXT NOT NULL,
                 feasibility_score   INTEGER NOT NULL,
                 feasibility_notes   TEXT NOT NULL,
@@ -159,6 +181,35 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             """
         )
 
+
+        # Topic-driven research questions have no gap; preserve the foreign key for branch B.
+        await conn.execute("ALTER TABLE research_questions ALTER COLUMN gap_id DROP NOT NULL;")
+
+        # Discussion writer and paper export share this persisted snapshot.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discussions (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                research_question_id INTEGER NOT NULL REFERENCES research_questions(id) ON DELETE CASCADE,
+                key_findings_paragraph TEXT NOT NULL,
+                literature_comparison_paragraph TEXT NOT NULL,
+                hypothesis_assessments JSONB NOT NULL DEFAULT '[]',
+                implications_paragraph TEXT NOT NULL,
+                limitations_paragraph TEXT NOT NULL,
+                future_work_paragraph TEXT NOT NULL,
+                conclusion_paragraph TEXT NOT NULL,
+                citations_used JSONB NOT NULL DEFAULT '[]',
+                citations_invalid JSONB NOT NULL DEFAULT '[]',
+                numbers_unverified JSONB NOT NULL DEFAULT '[]',
+                analysis_snapshot JSONB NOT NULL DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        # Upgrade databases that already have the writer's older table.
+        await conn.execute("ALTER TABLE discussions ADD COLUMN IF NOT EXISTS analysis_snapshot JSONB NOT NULL DEFAULT '{}';")
+        await conn.execute("CREATE INDEX IF NOT EXISTS discussions_project_id_idx ON discussions (project_id);")
 
         # introductions: kết quả module Scientific Writer (phần Introduction).
         # citations_used/citations_invalid do CODE tính sau khi verify — không phải LLM tự khai.

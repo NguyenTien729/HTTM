@@ -510,6 +510,15 @@
           <h2>
             Tiến trình nghiên cứu
           </h2>
+          <label id="branch-control" style="display:none">
+            Loại bản thảo
+            <select id="project-paper-type">
+              <option value="topic_research">Hướng A — nghiên cứu theo đề tài</option>
+              <option value="original_research">Hướng B — nghiên cứu từ gap</option>
+              <option value="review">Bài tổng quan tài liệu</option>
+            </select>
+            <small>Đổi luồng sẽ giữ tài liệu đã thu thập và các bản thảo đã lưu.</small>
+          </label>
           <nav id="nav">
           </nav>
           <div class="progress">
@@ -587,6 +596,56 @@
         return response
       }
       const json = async (m, p, b) => (await api(m, p, b)).json();
+      const exportEndpoint = (c, format = 'pdf') => c.paperType === 'review'
+        ? `/reviews/${c.reviewId}/export/${format}` : '/export/paper/' + c.rqId;
+
+      function showPaperDownload(c, box, initialBlob = null) {
+        let blob = initialBlob;
+        const error = el('div', {class: 'error'});
+        const button = el('button', {class: 'primary', onclick: async () => {
+          button.disabled = true;
+          error.textContent = '';
+          button.textContent = 'Đang chuẩn bị PDF…';
+          try {
+            if (!blob) blob = await (await api('POST', exportEndpoint(c), c.paperExportOptions || {})).blob();
+            if (!blob.size) throw Error('PDF trả về rỗng.');
+            const url = URL.createObjectURL(blob);
+            const link = el('a', {href: url, download: c.paperType === 'review' ? `review_${c.reviewId}.pdf` : `research_paper_rq_${c.rqId}.pdf`});
+            document.body.append(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          } catch (e) {
+            error.textContent = e.message || String(e);
+          } finally {
+            button.disabled = false;
+            button.textContent = '↓ Tải bài báo PDF';
+          }
+        }}, '↓ Tải bài báo PDF');
+        box.replaceChildren(button, error, note('Bạn có thể tải lại PDF sau khi làm mới trang.'));
+        if (c.paperType === 'review') {
+          const word = el('button', {onclick: async () => {
+            word.disabled = true;
+            error.textContent = '';
+            try {
+              const data = await (await api('POST', exportEndpoint(c, 'docx'), c.paperExportOptions || {})).blob();
+              const url = URL.createObjectURL(data);
+              const link = el('a', {href: url, download: `review_${c.reviewId}.docx`});
+              document.body.append(link); link.click(); link.remove();
+              setTimeout(() => URL.revokeObjectURL(url), 60000);
+            } catch (e) { error.textContent = e.message; }
+            finally { word.disabled = false; }
+          }}, '↓ Tải Word (.docx) để chỉnh sửa');
+          box.append(word);
+          box.append(el('button', {onclick: () => {
+            c.reviewManualEdit = true;
+            state.i = oldExportIndex + 1;
+            state.sum.length = state.i;
+            save();
+            location.reload();
+          }}, 'Chỉnh sửa nội dung (tùy chọn)'));
+        }
+      }
 
       function gate(box, label, fn) {
         return new Promise(resolve => {
@@ -625,7 +684,7 @@
         } catch {}
       };
       const steps = [{
-        title: 'Research Plan — Nhập đề tài',
+        title: 'Lập kế hoạch — Nhập đề tài',
         section: 'Lập kế hoạch',
         input: true,
         async run(c, box) {
@@ -652,10 +711,15 @@
           const type = el('input', {
             placeholder: 'survey / experiment / review'
           });
+          const paperType = el('select', {}, el('option', {value: 'topic_research'}, 'Hướng A — nghiên cứu và phân tích dữ liệu theo đề tài'),
+            el('option', {value: 'original_research'}, 'Hướng B — câu hỏi và giả thuyết từ research gap'),
+            el('option', {value: 'review'}, 'Bài tổng quan tài liệu (luồng riêng)'));
+          paperType.value = c.paperType || 'topic_research';
           const venue = el('input', {
             placeholder: 'Tạp chí/hội nghị (tuỳ chọn)'
           });
-          box.append(field('Chủ đề nghiên cứu *', topic), field(
+          box.append(field('Chủ đề nghiên cứu *', topic), field('Loại bài báo', paperType), note(
+            'Hướng A bám đúng đề tài, bỏ bước gap, rồi tìm và phân tích dữ liệu. Hướng B giữ luồng phát hiện và duyệt gap.'), field(
             'Quốc gia / khu vực nghiên cứu (Region)', region), note(
             'Nếu để trống Region, hệ thống có thể suy ra khu vực từ đề tài. Bộ lọc Region chỉ hoạt động khi backend đã cập nhật. Ngôn ngữ paper là ưu tiên trong plan, không phải bộ lọc bắt buộc.'
             ), el('div', {
@@ -673,6 +737,7 @@
               language: lang.value,
               target_paper_count: n
             };
+            payload.paper_type = paperType.value;
             if (type.value.trim()) payload.study_type = type.value.trim();
             if (venue.value.trim()) payload.target_venue = venue.value.trim();
             const r = await json('POST', '/plan', payload);
@@ -685,6 +750,7 @@
               count: n,
               plan: r.plan
             });
+            c.paperType = r.paper_type || paperType.value;
             box.replaceChildren(note('Đã tạo project #' + r.id), el('div', {}, 'Khu vực: ' + (
               r.plan.region || 'Không giới hạn')), el('div', {}, 'Từ khóa: ' + (r.plan
               .keywords || []).join(', ')));
@@ -692,7 +758,7 @@
           })
         }
       }, {
-        title: 'Literature Search — Bài báo mới nhất',
+        title: 'Tìm kiếm tài liệu theo chủ đề',
         section: 'Tổng quan tài liệu',
         async run(c, box) {
           const r = await json('POST', '/search/' + c.pid);
@@ -735,7 +801,7 @@
           return `Tìm thấy ${r.found||0}, lưu mới ${r.saved||0} bài • ${papers.length} bài hiển thị`
         }
       }, {
-        title: 'Phân tích từng paper',
+        title: 'Đọc và trích xuất bằng chứng',
         section: 'Tổng quan tài liệu',
         async run(c, box) {
           const r = await json('POST', '/analyze/' + c.pid);
@@ -744,7 +810,7 @@
           return `${r.total_analyzed||0} bài đã phân tích • ${r.fulltext_used||0} bài dùng full-text trong lượt này`
         }
       }, {
-        title: 'Tổng hợp themes',
+        title: 'Tổng hợp bằng chứng theo chủ đề',
         section: 'Tổng quan tài liệu',
         async run(c, box) {
           const r = await json('POST', '/synthesize/' + c.pid);
@@ -753,7 +819,7 @@
           return (r.themes || []).length + ' themes'
         }
       }, {
-        title: 'Phát hiện research gaps',
+        title: 'Xác định khoảng trống nghiên cứu',
         section: 'Câu hỏi nghiên cứu',
         async run(c, box) {
           const r = await json('POST', `/synthesize/${c.pid}/gaps`);
@@ -789,10 +855,11 @@
           })
         }
       }, {
-        title: 'Research Questions & Hypotheses',
+        title: 'Câu hỏi nghiên cứu',
         section: 'Câu hỏi nghiên cứu',
         async run(c, box) {
-          const r = await json('POST', '/research-questions/gap/' + c.gapId);
+          const r = await json('POST', c.paperType === 'topic_research'
+            ? '/research-questions/project/' + c.pid : '/research-questions/gap/' + c.gapId);
           const q = r.research_question;
           c.rq = q;
           c.rqId = q.id;
@@ -828,16 +895,21 @@
           return (r.citations_used || []).length + ' citations hợp lệ'
         }
       }, {
-        title: 'Tìm dataset trên Hugging Face',
+        title: 'Tìm dataset theo chủ đề project',
+        datasetDiscovery: true,
         section: 'Phân tích dữ liệu',
         async run(c, box) {
           const r = await json('POST', '/data-research/discover', {
               project_id: c.pid,
-              gap_id: c.gapId,
+              ...(c.paperType === 'original_research' && c.gapId ? {gap_id: c.gapId} : {}),
               limit: 10
           });
           c.datasets = r.datasets || [];
-          box.append(list(c.datasets.map(d => d.dataset_id)));
+          box.append(list(c.datasets.map(d => d.dataset_id + (d.relevance_note ? ' — ' + d.relevance_note : ''))));
+          if (!c.datasets.length) box.append(note('Chưa tìm được bộ dữ liệu có metadata đủ phù hợp trên Hugging Face và Mendeley Data. Xem trạng thái tìm kiếm để phân biệt lỗi nguồn với thiếu dữ liệu.', 'warning'));
+          if (r.search?.request_errors?.length) box.append(detail('Trạng thái các nguồn tìm kiếm', r.search.request_errors.join('\n')));
+          if (r.search?.query_expansion_mode === 'deterministic_fallback') box.append(note('Mở rộng ngữ nghĩa chưa khả dụng; tìm topic tiếng Việt trong metadata tiếng Anh có thể bỏ sót dữ liệu.', 'warning'));
+          else if (r.search?.insufficient_relevant_results) box.append(note('Chỉ tìm được ' + c.datasets.length + ' ứng viên phù hợp; không bổ sung dữ liệu lệch chủ đề để đủ số lượng.', 'warning'));
           return c.datasets.length + ' dataset ứng viên'
         }
       }, {
@@ -845,6 +917,12 @@
         section: 'Phân tích dữ liệu',
         input: true,
         async run(c, box) {
+          box.append(el('button', {onclick: () => {
+            state.i = steps.findIndex(s => s.datasetDiscovery);
+            state.sum.length = state.i;
+            save();
+            location.reload();
+          }}, 'Tìm lại dataset theo đề tài'));
           box.append(note(
             'Điểm phù hợp dựa trên metadata; hãy kiểm tra mô tả, giấy phép và dữ liệu thực tế.',
             'warning'));
@@ -854,14 +932,14 @@
             type: 'radio',
             name: 'dataset',
             value: d.dataset_id
-          }), el('strong', {}, d.dataset_id), el('small', {},
-            `Điểm: ${d.topic_match_score??'?'} • Lượt tải: ${d.downloads??'?'} • License: ${d.license||'không rõ'}`
-            ), el('small', {}, (d.description || '').slice(0, 250)), d.dataset_url ? el(
+          }), el('strong', {}, d.title || d.dataset_id), el('small', {}, d.source || 'Hugging Face'), el('small', {},
+            `Điểm khớp metadata: ${d.gap_match_score??'?'} • Lượt tải: ${d.downloads??'?'} • Giấy phép: ${d.license||'không rõ'}`
+            ), el('small', {}, d.relevance_note || ''), el('small', {}, (d.description || '').slice(0, 250)), d.dataset_url ? el(
           'a', {
             href: d.dataset_url,
             target: '_blank',
             rel: 'noopener noreferrer'
-          }, 'Mở Hugging Face') : '')));
+          }, 'Mở nguồn dữ liệu') : '')));
           const own = el('input', {
             placeholder: 'owner/dataset-name'
           });
@@ -890,6 +968,7 @@
             total: r.num_rows_total
           };
           box.append(detail('Danh sách cột', c.inspect.columns.map(x => x.name).join(', ')));
+          if (r.description) box.append(detail('Mô tả và giới hạn đo lường của nguồn', r.description));
           return `${c.inspect.columns.length} cột • ${c.inspect.splits.length} split`
         }
       }, {
@@ -907,7 +986,7 @@
           box.append(el('strong', {}, 'Xem trước dữ liệu'), tab(I.preview, cols.slice(0, 8)));
           const split = el('select', {}, I.splits.map((s, i) => el('option', {
             value: i
-          }, `${s.config} / ${s.split} (${s.num_rows??'?'} dòng)`)));
+          }, `${s.filename || s.config} / ${s.split} (${s.num_rows??'?'} dòng)`)));
           const options = () => [el('option', {
             value: ''
           }, '— Không chọn —'), ...cols.map(x => el('option', {
@@ -930,6 +1009,16 @@
           const confirm = el('input', {
             type: 'checkbox'
           });
+          const roleInputs = {};
+          const roleLabels = {auto: 'Tự nhận diện', identifier: 'Mã định danh', categorical: 'Phân loại', continuous: 'Liên tục', text: 'Văn bản', datetime: 'Thời gian'};
+          const rolesBox = el('div', {}, cols.map(name => {
+            const select = el('select', {}, Object.entries(roleLabels).map(([value, label]) => el('option', {value}, label)));
+            roleInputs[name] = select;
+            return field(name, select);
+          }));
+          const correlationInputs = el('div', {}, cols.map(name => el('label', {class: 'option'}, el('input', {type: 'checkbox', value: name}), name)));
+          box.append(detail('Vai trò biến: kiểm tra nhãn số và mã định danh', ''), rolesBox,
+            detail('Chọn biến tương quan (tối đa 20; để trống để tự chọn)', ''), correlationInputs);
           box.append(field('Split phân tích', split), el('div', {
               class: 'row three'
             }, field('Biến phụ thuộc', target), field('Biến nhóm', group), field(
@@ -944,12 +1033,18 @@
             const s = I.splits[Number(split.value)];
             c.selection = {
               dataset_id: c.datasetId,
+              project_id: c.pid,
+              ...(c.paperType === 'original_research' && c.gapId ? {gap_id: c.gapId} : {}),
               config: s.config,
               split: s.split,
               confirm_dataset: true,
               max_rows: Math.max(100, Math.min(100000, Number(max.value) || 50000)),
               predictor_columns: p
             };
+            c.selection.column_roles = Object.fromEntries(Object.entries(roleInputs).filter(([, input]) => input.value !== 'auto').map(([name, input]) => [name, input.value]));
+            const correlations = [...correlationInputs.querySelectorAll('input:checked')].map(input => input.value);
+            if (correlations.length > 20) throw Error('Chọn tối đa 20 biến tương quan.');
+            if (correlations.length) c.selection.correlation_columns = correlations;
             if (target.value) c.selection.target_column = target.value;
             if (group.value) c.selection.group_column = group.value;
             box.replaceChildren(note(`Đã xác nhận: ${c.datasetId} — ${s.config}/${s.split}`));
@@ -963,6 +1058,42 @@
         async run(c, box) {
           c.analysis = await json('POST', '/data-research/analyze', c.selection);
           box.append(detail('Results (bản nháp)', c.analysis.results_draft));
+          box.append(detail('Methods (bản nháp)', c.analysis.methods_draft));
+          box.append(detail('Vai trò biến và chất lượng trên mẫu', JSON.stringify({roles: c.analysis.column_roles, quality: c.analysis.quality_report}, null, 2)));
+          box.append(detail('Kế hoạch và kiểm định', JSON.stringify({plan: c.analysis.analysis_plan, tests: c.analysis.group_test, regression: c.analysis.ols_regression}, null, 2)));
+          for (const chart of c.analysis.charts || []) {
+            box.append(el('strong', {}, chart.column || 'Tương quan Pearson'));
+            if (chart.type === 'histogram' || chart.type === 'bar') {
+              const peak = Math.max(1, ...chart.counts);
+              chart.counts.forEach((count, i) => {
+                const label = chart.labels ? chart.labels[i] : `${chart.edges[i].toPrecision(3)} – ${chart.edges[i+1].toPrecision(3)}`;
+                box.append(el('div', {}, `${label}: ${count}`, el('div', {style: `height:12px;background:#4c78a8;width:${100*count/peak}%`})));
+              });
+            } else if (chart.type === 'heatmap') {
+              const table = el('table', {}, el('tr', {}, el('th', {}, ''), ...chart.columns.map(c => el('th', {}, c))));
+              chart.columns.forEach(a => table.append(el('tr', {}, el('th', {}, a), ...chart.columns.map(b => {
+                const value = chart.matrix[a][b];
+                return el('td', {style: `background:rgba(${value < 0 ? '220,80,60' : '60,120,210'},${value == null ? 0 : Math.abs(value)*.7})`}, value == null ? '—' : String(value));
+              }))));
+              box.append(table);
+            } else if (chart.type === 'boxplot') {
+              const all = chart.groups.flatMap(g => g.quantiles);
+              const lo = Math.min(...all), span = Math.max(...all)-lo || 1;
+              const scale = v => 10+280*(v-lo)/span;
+              chart.groups.forEach(g => {
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('viewBox', '0 0 300 30');
+                svg.style.maxWidth = '600px';
+                const [min,q1,median,q3,max] = g.quantiles;
+                for (const [tag, attrs] of [['line',{x1:scale(min),x2:scale(max),y1:15,y2:15,stroke:'#4c78a8'}],['rect',{x:scale(q1),y:5,width:Math.max(1,scale(q3)-scale(q1)),height:20,fill:'#9ecae1'}],['line',{x1:scale(median),x2:scale(median),y1:5,y2:25,stroke:'#222'}]]) {
+                  const node = document.createElementNS(svg.namespaceURI,tag);
+                  Object.entries(attrs).forEach(([k,v]) => node.setAttribute(k,v));
+                  svg.append(node);
+                }
+                box.append(el('div', {}, `${g.group} (n=${g.n}); min/Q1/median/Q3/max: ${g.quantiles.join(', ')}`), svg);
+              });
+            }
+          }
           const o = c.analysis.overview || {};
           return `${o.rows_analyzed??'?'} dòng • ${o.columns_count??'?'} cột`
         }
@@ -982,23 +1113,146 @@
           return 'Đã hoàn thành Discussion & Conclusion'
         }
       }, {
-        title: 'Xuất bài báo PDF',
+        title: 'Xuất bản thảo',
         section: 'Xuất bản',
+        input: true,
         async run(c, box) {
-          const blob = await (await api('POST', '/export/paper/' + c.rqId)).blob();
+          const title = el('input', {value: c.paperType === 'review' ? c.review.manuscript.title : c.topic || '', placeholder: 'Để trống để dùng tên đề tài'});
+          if (c.paperType === 'review') title.disabled = true;
+          const authors = el('textarea', {rows: 4, placeholder: 'Mỗi dòng: Họ tên | Đơn vị công tác | Email | * (tác giả liên hệ)'});
+          const keywords = el('input', {placeholder: 'Các từ khóa, phân cách bằng dấu chấm phẩy'});
+          const notes = el('input', {type: 'checkbox'});
+          box.append(field('Tiêu đề bài báo', title), field('Tác giả (tùy chọn)', authors),
+            field('Từ khóa (để trống để dùng từ khóa đề tài)', keywords),
+            el('label', {class: 'option'}, notes, 'Kèm trang ghi chú dành cho tác giả'));
+          return gate(box, 'Tạo bản PDF bài báo →', async () => {
+          const options = {include_author_notes: notes.checked, authors: authors.value.split('\n').filter(line => line.trim()).map(line => {
+            const [name, affiliation = '', email = '', corresponding = ''] = line.split('|').map(s => s.trim());
+            return {name, affiliation, email, corresponding: corresponding === '*'};
+          })};
+          if (title.value.trim()) options.title = title.value.trim();
+          if (keywords.value.trim()) options.keywords = keywords.value.split(';').map(s => s.trim()).filter(Boolean);
+          const blob = await (await api('POST', exportEndpoint(c), options)).blob();
           if (!blob.size) throw Error('PDF trả về rỗng.');
-          const url = URL.createObjectURL(blob);
-          const a = el('a', {
-            class: 'btn primary',
-            href: url,
-            download: `research_paper_rq_${c.rqId}.pdf`
-          }, '↓ Tải bài báo PDF');
-          box.append(a, note(
-            'Kiểm tra mục ghi chú tác giả và toàn bộ trích dẫn trước khi sử dụng.'));
+          c.paperExportOptions = options;
+          showPaperDownload(c, box, blob);
           return 'Hoàn tất • PDF sẵn sàng tải xuống'
+          });
         }
       }];
+      // Keep the existing empirical branch intact; review has its own writing engine.
+      steps.forEach((step, i) => { if (i >= 5 && i < steps.length-1) step.paperType = 'original_research'; });
+      steps[4].paperType = 'original_research';
+      for (let i = 6; i < steps.length-1; i++) {
+        delete steps[i].paperType;
+        steps[i].paperTypes = ['topic_research', 'original_research'];
+      }
+      const oldExportIndex = steps.length-1;
+      steps.splice(oldExportIndex, 0, {
+        title: 'Viết bản thảo tổng quan theo bằng chứng', section: 'Viết bài tổng quan', paperType: 'review',
+        async run(c, box) {
+          c.review = await json('POST', '/reviews/project/' + c.pid);
+          c.reviewId = c.review.id;
+          for (const section of c.review.manuscript.sections) {
+            box.append(detail(section.title, section.paragraphs.map(p => p.text).join('\n\n')));
+          }
+          box.append(note('Bản tổng quan tường thuật; chưa kiểm chứng nội dung. Mọi trích đoạn có thể xem ở bước chỉnh sửa.', 'warning'));
+          return 'Bản thảo #' + c.reviewId + ' • ' + c.review.manuscript.papers.length + ' tài liệu nguồn';
+        }
+      }, {
+        title: 'Chỉnh sửa bản thảo (tùy chọn)', section: 'Viết bài tổng quan', paperType: 'review', input: true, reviewEditor: true,
+        async run(c, box) {
+          c.review = await json('GET', '/reviews/' + c.reviewId);
+          const manuscript = c.review.manuscript;
+          const title = el('input', {value: manuscript.title});
+          box.append(field('Tiêu đề', title));
+          const previousChecks = c.review.validation || {};
+          const previousIssues = [...(previousChecks.errors || []).map(e => e.paragraph_id + ': ' + e.reason),
+            ...(previousChecks.semantic_decisions || []).filter(d => !d.supported).map(d => d.paragraph_id + ': ' + d.reason)];
+          if (previousIssues.length) box.append(note('Các đoạn cần sửa:', 'warning'), list(previousIssues));
+          const edits = {};
+          for (const section of manuscript.sections) {
+            if (section.key === 'methodology') {
+              box.append(detail(section.title + ' (từ nhật ký thực tế)', section.paragraphs.map(p => p.text).join('\n\n')));
+              continue;
+            }
+            box.append(el('h3', {}, section.title));
+            edits[section.key] = section.paragraphs.map((paragraph, i) => {
+              const text = el('textarea', {rows: 6, value: paragraph.text});
+              const evidence = el('div');
+              const links = [];
+              function addLink(link) {
+                const source = el('select', {}, manuscript.evidence_sources.map(s => {
+                  const paper = manuscript.papers.find(p => p.id === s.paper_id);
+                  return el('option', {value: s.source_id}, `[${s.paper_id}] ${paper?.title || ''} — ${s.kind === 'abstract' ? 'Tóm tắt' : 'Đoạn toàn văn'}`);
+                }));
+                source.value = link.source_id || manuscript.evidence_sources[0].source_id;
+                const quote = el('textarea', {rows: 3, value: link.quote || ''});
+                const omit = el('input', {type: 'checkbox'});
+                const preview = el('div');
+                const refresh = () => {
+                  preview.replaceChildren(detail('Xem trích đoạn nguồn', manuscript.evidence_sources.find(s => s.source_id === source.value)?.text || ''));
+                };
+                source.onchange = refresh; refresh();
+                evidence.append(field('Nguồn bằng chứng', source), preview, field('Trích dẫn nguyên văn hỗ trợ đoạn viết', quote),
+                  el('label', {}, omit, ' Bỏ liên kết này'));
+                links.push({source, quote, omit});
+              }
+              paragraph.evidence.forEach(addLink);
+              box.append(field('Đoạn ' + (i+1) + ' — trích dẫn theo mã bài [n]', text), evidence,
+                el('button', {onclick: () => addLink({})}, 'Thêm nguồn bằng chứng'));
+              return {text, links};
+            });
+          }
+          box.append(note('Đối chiếu nội dung với nguồn trước khi xác nhận. Chỉnh sửa sẽ tạo phiên bản mới và phải kiểm chứng lại.'));
+          return gate(box, 'Lưu phiên bản và kiểm chứng →', async () => {
+            const sections = {};
+            for (const [key, paragraphs] of Object.entries(edits)) sections[key] = {paragraphs: paragraphs.map(p => ({
+              text: p.text.value, evidence: p.links.filter(l => !l.omit.checked).map(l => ({
+                source_id: l.source.value, paper_id: manuscript.evidence_sources.find(s => s.source_id === l.source.value).paper_id,
+                quote: l.quote.value
+              }))
+            }))};
+            c.review = await json('PUT', '/reviews/' + c.reviewId, {title: title.value, sections});
+            c.reviewId = c.review.id;
+            c.reviewManualEdit = false;
+            box.replaceChildren(note('Đã lưu phiên bản #' + c.reviewId));
+            return 'Phiên bản #' + c.reviewId + ' đã lưu';
+          });
+        }
+      }, {
+        title: 'Tự kiểm chứng và sửa bản thảo', section: 'Kiểm chứng khoa học', paperType: 'review', back: oldExportIndex+1,
+        async run(c, box) {
+          const report = await json('POST', '/reviews/' + c.reviewId + '/validate');
+          const validation = report.validation;
+          c.reviewId = report.id || c.reviewId;
+          c.review = {...c.review, id: c.reviewId, status: report.status, validation,
+            manuscript: report.manuscript || c.review.manuscript};
+          save();
+          const issues = [...(validation.errors || []).map(e => e.paragraph_id + ': ' + e.reason),
+            ...(validation.semantic_decisions || []).filter(d => !d.supported).map(d => d.paragraph_id + ': ' + d.reason)];
+          if (issues.length) box.append(list(issues));
+          if (!validation.ok) throw Error('Hệ thống đã tự sửa và kiểm tra lại nhưng vẫn chưa đủ bằng chứng để xác nhận một số đoạn. Có thể thử lại tự động hoặc bổ sung nguồn/điều chỉnh phạm vi.');
+          const rounds = validation.auto_repair?.rounds || 0;
+          if (rounds) box.append(note('Đã tự chỉnh sửa và kiểm tra lại bản thảo trong ' + rounds + ' lượt.'));
+          box.append(detail('Nội dung sau kiểm chứng', c.review.manuscript.sections.map(s => s.title + '\n' + s.paragraphs.map(p => p.text).join('\n\n')).join('\n\n')));
+          box.append(note('Đã kiểm tra mã nguồn, trích đoạn, số liệu và đối chiếu nội dung bằng AI. Cần tác giả rà soát học thuật trước khi sử dụng.'));
+          return 'Đạt kiểm chứng tự động • vẫn cần rà soát học thuật';
+        }
+      });
+      // Migrate progress from the prior 16-step empirical workflow without losing its project.
+      if (!state.workflowVersion) {
+        if (state.ctx.pid && !state.ctx.paperType) state.ctx.paperType = 'original_research';
+        if (state.i >= oldExportIndex) {
+          if (state.sum[oldExportIndex]) state.sum[oldExportIndex+3] = state.sum[oldExportIndex];
+          state.i += 3;
+        }
+        state.workflowVersion = 3;
+        save();
+      }
       const cards = [];
+      const matchesBranch = (step) => (!step.paperType || step.paperType === (state.ctx.paperType || 'topic_research'))
+        && (!step.paperTypes || step.paperTypes.includes(state.ctx.paperType || 'topic_research'));
       steps.forEach((step, i) => {
         const dot = el('div', {
             class: 'dot'
@@ -1034,14 +1288,23 @@
       });
 
       function update() {
+        $('#branch-control').style.display = state.ctx.pid ? 'block' : 'none';
+        $('#project-paper-type').value = state.ctx.paperType || 'original_research';
+        $('#project-paper-type').disabled = !!document.querySelector('.step.run');
         cards.forEach((card, i) => {
+          const skipped = !matchesBranch(steps[i])
+            || (steps[i].reviewEditor && !state.ctx.reviewManualEdit);
+          card.root.style.display = skipped ? 'none' : '';
           const stateClass = i < state.i ? 'done' : i === state.i ? 'active' : '';
           const n = $('#nav').children[i];
+          n.style.display = skipped ? 'none' : '';
           n.className = 'navitem ' + stateClass;
           n.querySelector('.navnum').textContent = i < state.i ? '✓' : i + 1
         });
-        $('#bar').style.width = (100 * state.i / steps.length) + '%';
-        $('#progress-label').textContent = `${state.i}/${steps.length} bước đã hoàn tất`
+        const applicable = steps.map((s, i) => ({s,i})).filter(({s}) => matchesBranch(s) && (!s.reviewEditor || state.ctx.reviewManualEdit));
+        const finished = applicable.filter(({i}) => i < state.i).length;
+        $('#bar').style.width = (100 * finished / applicable.length) + '%';
+        $('#progress-label').textContent = `${finished}/${applicable.length} bước đã hoàn tất`
       }
 
       function status(i, kind, summary) {
@@ -1053,7 +1316,12 @@
         update()
       }
       steps.forEach((_, i) => {
-        if (i < state.i) status(i, 'done', state.sum[i] || 'Đã hoàn thành')
+        if (i < state.i) {
+          status(i, 'done', state.sum[i] || 'Đã hoàn thành');
+          if (i === steps.length - 1 && (state.ctx.rqId || state.ctx.reviewId)) {
+            showPaperDownload(state.ctx, cards[i].body);
+          }
+        }
       });
       let busy = false;
       async function run() {
@@ -1063,6 +1331,12 @@
           const i = state.i,
             step = steps[i],
             card = cards[i];
+          if (!matchesBranch(step)) {
+            state.i++; save(); update(); continue;
+          }
+          if (step.reviewEditor && !state.ctx.reviewManualEdit) {
+            state.i++; save(); update(); continue;
+          }
           status(i, step.input ? 'wait' : 'run', step.input ? 'Đang chờ xác nhận' : 'Đang xử lý…');
           card.body.replaceChildren();
           card.root.scrollIntoView({
@@ -1089,12 +1363,13 @@
             }, 'Thử lại'));
             if (step.back !== undefined) card.body.append(el('button', {
               onclick: () => {
+                if (step.paperType === 'review') state.ctx.reviewManualEdit = true;
                 state.i = step.back;
                 state.sum.length = state.i;
                 save();
                 location.reload()
               }
-            }, 'Quay lại bước chọn'));
+            }, step.paperType === 'review' ? 'Quay lại chỉnh sửa bản thảo' : 'Quay lại bước chọn'));
             busy = false;
             return
           }
@@ -1109,6 +1384,22 @@
         if (confirm('Xóa tiến trình đang lưu trên trình duyệt và bắt đầu nghiên cứu mới?')) {
           localStorage.removeItem(KEY);
           location.reload()
+        }
+      };
+      $('#project-paper-type').onchange = async event => {
+        const nextType = event.target.value;
+        event.target.disabled = true;
+        try {
+          await json('PATCH', '/plan/' + state.ctx.pid + '/paper-type', {paper_type: nextType});
+          state.ctx.paperType = nextType;
+          if (state.i >= 4) state.i = nextType === 'review' ? oldExportIndex : nextType === 'topic_research' ? 6 : 4;
+          state.sum.length = state.i;
+          save();
+          location.reload();
+        } catch (e) {
+          event.target.value = state.ctx.paperType;
+          event.target.disabled = false;
+          alert(e.message || 'Không đổi được loại bài.');
         }
       };
       update();

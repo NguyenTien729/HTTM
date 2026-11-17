@@ -126,6 +126,9 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             );
             """
         )
+        await conn.execute("ALTER TABLE paper_analyses ADD COLUMN IF NOT EXISTS plain_language_summary TEXT NOT NULL DEFAULT '';")
+        await conn.execute("ALTER TABLE paper_analyses ADD COLUMN IF NOT EXISTS evidence_basis TEXT NOT NULL DEFAULT 'unknown';")
+        await conn.execute("ALTER TABLE paper_analyses ADD COLUMN IF NOT EXISTS evidence_excerpt TEXT;")
 
         # themes: kết quả gom cụm của module Synthesis. Mỗi lần chạy lại /synthesize
         # sẽ xoá theme cũ của project và lưu theme mới (đơn giản cho MVP, chưa versioning).
@@ -280,3 +283,5 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
             );
             """
         )
+        from app.autonomous.store import init_schema as init_autonomous_schema
+        await init_autonomous_schema(conn)

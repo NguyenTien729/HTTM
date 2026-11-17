@@ -80,6 +80,7 @@ class SearchResponse(BaseModel):
     found: int          # số paper đạt mọi bộ lọc (đủ mới, đúng khu vực, đủ citation)
     saved: int          # số paper mới thực sự lưu (sau dedup)
     papers: List[Paper]
+    search_audit: dict = Field(default_factory=dict)
     year_from: Optional[int] = None                  # paper được lấy từ năm này đến nay
     min_citations_per_year: Optional[float] = None   # ngưỡng citation/năm thực tế đã áp dụng
 
@@ -90,6 +91,8 @@ class PaperAnalysisExtraction(BaseModel):
     """Schema dùng riêng để ép LLM trả JSON khi phân tích 1 abstract.
     Không có id/paper_id/project_id — những field đó do code tự gắn sau,
     không để LLM tự sinh (tránh LLM bịa ID)."""
+    plain_language_summary: str = Field(default="", description="Explain in clear Vietnamese what the study did, what it found, and what it cannot establish. Keep to 2-3 source-grounded sentences.")
+    evidence_excerpt: Optional[str] = Field(default=None, description="One short exact sentence from the supplied abstract/full-text excerpts that supports the main finding. Null if no excerpt supports it.")
     method: Optional[str] = Field(default=None, description="Phương pháp nghiên cứu, ví dụ: 'Survey', 'Experiment'. Null nếu abstract không nêu rõ.")
     population: Optional[str] = Field(default=None, description="Đối tượng/mẫu nghiên cứu, ví dụ: 'University students, N=523'. Null nếu không rõ.")
     context: Optional[str] = Field(default=None, description="Bối cảnh/quốc gia/lĩnh vực nếu abstract có nêu. Null nếu không rõ.")
@@ -106,6 +109,10 @@ class PaperAnalysis(BaseModel):
     population: Optional[str] = None
     context: Optional[str] = None
     key_finding: str
+    plain_language_summary: str = ""
+    evidence_excerpt: Optional[str] = None
+    evidence_basis: str = "unknown"
+    title: Optional[str] = None
     limitation: Optional[str] = None
 
 
@@ -363,6 +370,7 @@ class Discussion(DiscussionExtraction):
 
 class WriteDiscussionRequest(BaseModel):
     analysis_result: dict[str, Any]
+    revision_notes: str = Field(default="", max_length=4000)
 
 
 class WriteDiscussionResponse(BaseModel):

@@ -9,7 +9,9 @@ Hai loại tài liệu:
                                    (Discussion lưu kèm kết quả /data-research/analyze).
   POST /export/proposal/{rq_id}  — (giữ nguyên) Research Proposal: chưa có Methods/Results thật.
 
-Nguyên tắc: bước export KHÔNG gọi LLM và không tự sinh số liệu — chỉ ráp dữ liệu đã lưu trong DB
+Nguyên tắc: số liệu export chỉ lấy từ kết quả đã lưu, không tự sinh số liệu.
+Tiêu đề/chú giải có thể được Việt hóa từ văn bản và metadata nguồn trước khi dựng PDF;
+phần dựng PDF thuần túy chỉ ráp dữ liệu đã chuẩn bị.
 (văn bản đã được verify citation/số liệu ở bước viết). Citation được đánh số lại [1], [2]... theo
 thứ tự xuất hiện; citation không tồn tại bị xoá khỏi bài và ghi vào "Ghi chú dành cho tác giả".
 Font NotoSans (Unicode, hỗ trợ dấu tiếng Việt).
@@ -411,27 +413,29 @@ def _fmt(value, digits: int = 3) -> str:
     if isinstance(value, bool):
         return str(value)
     if isinstance(value, int):
-        return f"{value:,}"
+        return f"{value:,}".replace(",", ".")
     if isinstance(value, float):
-        return f"{value:,.{digits}f}"
+        return f"{value:,.{digits}f}".replace(",", "_").replace(".", ",").replace("_", ".")
     return str(value)
 
 
 def _fmt_p(value) -> str:
     if value is None:
         return "–"
-    return "< 0.001" if value < 0.001 else f"{value:.3f}"
+    return "< 0,001" if value < 0.001 else f"{value:.3f}".replace(".", ",")
 
 
 def _p_clause(value) -> str:
     """'p < 0.001' hoặc 'p = 0.123' (không viết 'p = < 0.001')."""
     if value is None:
         return "p = –"
-    return "p < 0.001" if value < 0.001 else f"p = {value:.3f}"
+    return "p < 0,001" if value < 0.001 else "p = " + _fmt_p(value)
 
 
 def _clean_draft_text(text: str | None) -> str:
-    return vietnamese_prose(text).replace("`", "").strip()
+    text = vietnamese_prose(text).replace("`", "").strip()
+    names = {"mean": "trung bình", "sd": "độ lệch chuẩn", "median": "trung vị"}
+    return re.sub(r"\b(mean|SD|median)\s*=\s*(-?\d+(?:\.\d+)?)", lambda m: names[m[1].lower()] + " " + _fmt(float(m[2]), 2), text, flags=re.I)
 
 
 # ---- Đánh số lại citation theo thứ tự xuất hiện (chuẩn bài báo) ------------ #
@@ -476,7 +480,10 @@ def _strip_citations(text: str) -> str:
 def _first_sentences(text: str, max_sentences: int = 2, max_chars: int = 450) -> str:
     parts = re.split(r"(?<=[.!?])\s+", _strip_citations(text))
     out = " ".join(parts[:max_sentences]).strip()
-    return out if len(out) <= max_chars else out[: max_chars - 1].rstrip() + "…"
+    selected = parts[:max_sentences]
+    while len(" ".join(selected)) > max_chars and len(selected) > 1:
+        selected.pop()
+    return " ".join(selected).strip()  # Preserve whole sentences; never truncate mid-word.
 
 
 # ---- Nạp dữ liệu ------------------------------------------------------------ #
@@ -520,6 +527,16 @@ async def _load_paper_data(research_question_id: int) -> dict:
     data["discussion"] = disc
     data["keywords"] = (plan or {}).get("keywords", [])[:6]
     data["references"] = [dict(r) for r in refs]
+    from app.services.manuscript_language import translate_headings
+    themes = data["related_work"]["theme_paragraphs"]
+    translated = await translate_headings([theme["theme_name"] for theme in themes])
+    data["related_work"]["theme_paragraphs"] = [theme | {"theme_name": title} for theme, title in zip(themes, translated)]
+    snap = disc.get("analysis_snapshot") or {}
+    if not snap.get("variable_guide"):
+        from app.data_research.interpretation import dataset_guide
+        names = list((snap.get("column_summaries") or {}).keys())
+        names += [p[k] for p in snap.get("top_correlations_pearson", []) for k in ("var_1", "var_2")]
+        snap["variable_guide"] = await dataset_guide(list(dict.fromkeys(names)), snap.get("dataset") or {})
     return data
 
 
@@ -558,36 +575,35 @@ def _results_tables(snap: dict, styles: dict) -> list:
     n_tab = 0
 
     summaries = snap.get("column_summaries") or {}
-    numeric = [(c, s) for c, s in summaries.items() if s.get("kind") == "numeric" and s.get("n")]
+    from app.services.results_presentation import numeric_variables, label, value_label
+    numeric = numeric_variables(snap)
     if numeric:
         n_tab += 1
-        rows = [[c, _fmt(s.get("n")), _fmt(s.get("mean")), _fmt(s.get("std")),
-                 _fmt(s.get("median")), _fmt(s.get("min")), _fmt(s.get("max"))]
-                for c, s in numeric[:_MAX_TABLE_ROWS]]
-        note = None
-        if len(numeric) > _MAX_TABLE_ROWS:
-            note = f"Chỉ hiển thị {_MAX_TABLE_ROWS}/{len(numeric)} biến số đầu tiên."
+        rows = [[label(snap, c), _fmt(s.get("n")), _fmt(s.get("mean"), 2), _fmt(s.get("std"), 2),
+                 _fmt(s.get("median"), 2), f"{_fmt(s.get('min'), 2)}–{_fmt(s.get('max'), 2)}"] for c, s in numeric]
+        note = "Số hợp lệ là số quan sát dùng cho từng biến; độ lệch chuẩn mô tả độ phân tán. Khoảng quan sát không mặc nhiên là giới hạn lý thuyết. Các mã phân loại không được diễn giải bằng trung bình."
         flow += _table_block(f"Bảng {n_tab}. Thống kê mô tả các biến số",
-                             ["Biến", "N", "Mean", "SD", "Median", "Min", "Max"], rows,
-                             [3, 1, 1.2, 1.2, 1.2, 1.2, 1.2], styles, note)
+                             ["Biến và ý nghĩa", "Số hợp lệ", "Trung bình", "Độ lệch chuẩn", "Trung vị", "Nhỏ nhất–lớn nhất"], rows,
+                             [3.5, 1, 1.1, 1.1, 1.1, 1.5], styles, note)
 
     categorical = [(c, s) for c, s in summaries.items() if s.get("kind") == "categorical" and s.get("top_values")]
     if categorical:
         n_tab += 1
         rows = []
         for col, s in categorical[:6]:
-            for tv in s["top_values"][:3]:
-                rows.append([col, tv["value"], _fmt(tv["count"]), f"{_fmt(tv.get('percent_of_non_missing'), 1)}%"])
-        flow += _table_block(f"Bảng {n_tab}. Phân phối biến phân loại (tối đa 3 giá trị phổ biến nhất mỗi biến)",
-                             ["Biến", "Giá trị", "Tần số", "Tỷ lệ"], rows, [2.5, 3.5, 1.2, 1.2], styles)
+            for tv in s["top_values"][:10]:
+                rows.append([label(snap, col), value_label(snap, col, tv["value"]), _fmt(tv["count"]), f"{_fmt(tv.get('percent_of_non_missing'), 1)}%"])
+        flow += _table_block(f"Bảng {n_tab}. Phân phối các biến phân loại",
+                             ["Biến", "Mã/giá trị gốc", "Số lượng", "Tỷ lệ"], rows, [3, 3, 1.2, 1.2], styles,
+                             "Tỷ lệ tính trên các giá trị không thiếu. Hiển thị tối đa 10 mã phổ biến mỗi biến; nhãn mã chỉ được dùng khi mô tả nguồn cung cấp cách mã hóa.")
 
     corr = snap.get("top_correlations_pearson") or []
     if corr:
         n_tab += 1
-        rows = [[c["var_1"], c["var_2"], _fmt(c["pearson_r"])] for c in corr]
+        rows = [[label(snap, c["var_1"]), label(snap, c["var_2"]), _fmt(c["pearson_r"])] for c in corr]
         flow += _table_block(f"Bảng {n_tab}. Các cặp biến có tương quan Pearson mạnh nhất",
                              ["Biến 1", "Biến 2", "r"], rows, [3, 3, 1.2], styles,
-                             "Tương quan không hàm ý quan hệ nhân quả.")
+                             "r từ −1 đến 1; dấu cho biết chiều liên hệ. Đây chỉ là các cặp có |r| lớn nhất, không phải toàn bộ ma trận. Cặp không xuất hiện không có nghĩa là không liên hệ. Tương quan không chứng minh nhân quả.")
 
     gt = snap.get("group_test")
     if gt and gt.get("status") == "ok":
@@ -596,7 +612,7 @@ def _results_tables(snap: dict, styles: dict) -> list:
             rows = [[g["group"], _fmt(g["n"]), _fmt(g.get("mean")), _fmt(g.get("std"))] for g in gt["group_summary"]]
             flow += _table_block(
                 f"Bảng {n_tab}. {gt.get('target_column')} theo nhóm {gt.get('group_column')}",
-                ["Nhóm", "N", "Mean", "SD"], rows, [3, 1, 1.2, 1.2], styles)
+                ["Nhóm", "Số hợp lệ", "Trung bình", "Độ lệch chuẩn"], rows, [3, 1, 1.2, 1.2], styles)
             n_tab += 1
         tests = gt.get("tests") or ([gt["test"]] if gt.get("test") else [])
         if tests:
@@ -611,13 +627,13 @@ def _results_tables(snap: dict, styles: dict) -> list:
     ols = snap.get("ols_regression")
     if ols and ols.get("status") == "ok":
         n_tab += 1
-        rows = [[c["term"], _fmt(c.get("coefficient")), _fmt(c.get("std_error")), _fmt(c.get("t_statistic")),
+        rows = [["Hệ số chặn" if c["term"] == "intercept" else label(snap, c["term"]), _fmt(c.get("coefficient")), _fmt(c.get("std_error")), _fmt(c.get("t_statistic")),
                  _fmt_p(c.get("p_value")), f"[{_fmt(c.get('ci_95_lower'))}; {_fmt(c.get('ci_95_upper'))}]"]
                 for c in ols.get("coefficients", [])]
         note = (f"Biến phụ thuộc: {ols.get('target')}; N = {_fmt(ols.get('n'))}; R² = {_fmt(ols.get('r_squared'))}; "
                 f"R² hiệu chỉnh = {_fmt(ols.get('adjusted_r_squared'))}; mô hình tổng thể: {_p_clause(ols.get('model_p_value'))}.")
         flow += _table_block(f"Bảng {n_tab}. Hồi quy tuyến tính OLS",
-                             ["Hạng tử", "B", "SE", "t", "p", "CI 95%"], rows,
+                             ["Biến", "Hệ số B", "Sai số chuẩn", "Giá trị t", "Giá trị p", "Khoảng tin cậy 95%"], rows,
                              [2.2, 1.2, 1.2, 1.1, 1.1, 2.6], styles, note)
     return flow
 
@@ -679,10 +695,12 @@ def _prepare_paper(data: dict) -> dict:
         "limitations_paragraph", "future_work_paragraph", "conclusion_paragraph")}
     assessments = [{**a, "explanation": num.apply(a["explanation"])} for a in disc["hypothesis_assessments"]]
     intro_paras = [vietnamese_prose(p) for p in intro_paras]
-    related_themes = [(vietnamese_prose(name), vietnamese_prose(text)) for name, text in related_themes]
+    from app.services.manuscript_language import safe_heading
+    related_themes = [(safe_heading(name, i+1), vietnamese_prose(text)) for i, (name, text) in enumerate(related_themes)]
     related_contra, related_gap = vietnamese_prose(related_contra), vietnamese_prose(related_gap)
     d = {k: vietnamese_prose(value) for k, value in d.items()}
     assessments = [{**a, "explanation": vietnamese_prose(a["explanation"])} for a in assessments]
+    article_abstract = num.apply(data["article_abstract"]) if data.get("article_abstract") else None
 
     ordered_refs = []
     by_id = {p["id"]: p for p in data["references"]}
@@ -711,7 +729,7 @@ def _prepare_paper(data: dict) -> dict:
         "related_contra": related_contra, "related_gap": related_gap,
         "methods": methods_text, "results_paras": results_paras, "snap": snap,
         "discussion": d, "assessments": assessments, "references": ordered_refs, "notes": notes,
-        "abstract": _build_abstract(data["rq"], snap, d, d["conclusion_paragraph"], assessments),
+        "abstract": _esc(article_abstract) if article_abstract else _build_abstract(data["rq"], snap, d, d["conclusion_paragraph"], assessments),
     }
 
 
@@ -782,7 +800,7 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
     if rq["is_quantitative"] and rq["variables"]:
         story.append(P("Biến số", "H2"))
         story.append(ListFlowable(
-            [ListItem(Paragraph(f"<b>{_esc(v['name'])}</b> ({_esc(v['role'])}) — {_esc(v['description'])}", styles["Body"]))
+            [ListItem(Paragraph(f"<b>{_esc(v['name'])}</b> ({_esc({'independent': 'biến độc lập', 'dependent': 'biến phụ thuộc', 'control': 'biến kiểm soát', 'moderator': 'biến điều tiết', 'mediator': 'biến trung gian'}.get(v['role'], v['role']))}) — {_esc(v['description'])}", styles["Body"]))
              for v in rq["variables"]], bulletType="bullet"))
     if rq["is_quantitative"] and rq["hypotheses"]:
         story.append(P("Giả thuyết", "H2"))
@@ -803,11 +821,31 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
 
     # ---- 5. Results ----
     story.append(P("5. Kết quả nghiên cứu", "H1"))
+    from app.services.results_presentation import results_explanations, figure_blocks, guide_for
+    guide = guide_for(snap)
+    story.append(P("5.1. Bộ dữ liệu và cách đọc các biến", "H2"))
+    for explanation in results_explanations(snap):
+        story.append(P(explanation))
+    if not guide:
+        story.append(P("Kết quả lưu hiện chưa có chú giải biến được đối chiếu với mô tả/bảng mã nguồn. Mã cột được giữ nguyên; không suy đoán nội dung câu hỏi từ mã viết tắt."))
+    stored_count = len(snap.get("column_summaries") or {})
+    total_columns = (snap.get("overview") or {}).get("columns_count")
+    if total_columns and stored_count < total_columns:
+        story.append(P(f"Bản kết quả này chỉ lưu thống kê của {stored_count}/{total_columns} cột; các bảng dưới đây không đại diện cho toàn bộ biến. Cần chạy lại phân tích và lưu kết quả mới để có đủ các biến."))
+    story.append(P("5.2. Thống kê và mối liên hệ giữa các biến", "H2"))
     for text in paper["results_paras"]:
         story.append(P(text))
     result_tables = _results_tables(snap, styles)
     story.extend(result_tables)
     table_count = sum(isinstance(item, Paragraph) and item.style is styles["Caption"] for item in result_tables)
+    figures = figure_blocks(snap, _PAPER_FONT, doc.width)
+    if figures:
+        story.append(P("5.3. Biểu diễn trực quan", "H2"))
+        for i, (drawing, caption, note) in enumerate(figures, 1):
+            story.append(Paragraph(_esc(f"Hình {i}. {caption}"), styles["Caption"]))
+            story.append(drawing)
+            story.append(P(note, "TableNote"))
+            story.append(Spacer(1, 10))
 
     # ---- 6. Discussion ----
     d = paper["discussion"]
@@ -827,6 +865,10 @@ def _build_paper_pdf(data: dict, output_path: Path) -> None:
     story.append(P("6.3. Hạn chế và hướng nghiên cứu tiếp theo", "H2"))
     story.append(P(d["limitations_paragraph"]))
     tech_limits = snap.get("limitations_from_analysis") or []
+    if not ds.get("sampled"):
+        tech_limits = [t for t in tech_limits if not t.startswith("Nếu có lấy mẫu")]
+    if ds.get("analysis_mode") != "structure_only":
+        tech_limits = [t for t in tech_limits if "text phức tạp, ảnh, audio" not in t]
     if tech_limits:
         story.append(ListFlowable(
             [ListItem(Paragraph(_esc(t), styles["Body"])) for t in tech_limits], bulletType="bullet"))

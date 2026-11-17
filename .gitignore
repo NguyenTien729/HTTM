@@ -7,3 +7,6 @@ __pycache__/
 artifacts/.review-test-db/
 artifacts/.review-browser-profile/
 artifacts/.review-test-db.log
+artifacts/autonomous/
+artifacts/.autonomous-browser-profile/
+artifacts/autonomous-preview/

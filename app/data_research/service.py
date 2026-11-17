@@ -173,6 +173,16 @@ def _search_topic(gap):
     return str(gap.get("project_topic") or " ".join(str(gap.get(k) or "") for k in ("description", "proposed_research_question")))
 
 
+def _scope_terms(gap):
+    """Retain explicit Vietnam scope even when query expansion fails."""
+    terms = [_normalized_text(t) for t in gap.get("_search_scope_terms", [])]
+    topic = _normalized_text(_search_topic(gap))
+    aliases = ["viet nam", "vietnam"]
+    if any(_has_phrase(topic, alias) for alias in aliases):
+        terms.extend(aliases)
+    return list(dict.fromkeys(t for t in terms if t))
+
+
 def _dataset_short_queries(gap):
     # No domain-specific templates: derive every fallback from this project.
     terms = list(dict.fromkeys(_topic_terms(_search_topic(gap))))
@@ -199,7 +209,7 @@ def _gap_seed_queries(gap: dict[str, Any]) -> list[str]:
                 if len(phrase) >= 2:
                     queries.append(" ".join(phrase))
 
-    queries = _dataset_short_queries(gap) + queries
+    queries = list(gap.get("_data_queries") or []) + _dataset_short_queries(gap) + queries
     return _dedupe_queries(queries)
 
 
@@ -214,6 +224,36 @@ def _dedupe_queries(queries: list[str], excluded: set[str] | None = None) -> lis
         seen.add(normalized)
         result.append(query[:120])
     return result
+
+
+def _hub_retrieval_queries(gap, expanded, seeds):
+    """Hub text search needs short index terms; relevance is checked separately."""
+    short = []
+    for group in gap.get("_search_concept_groups", []):
+        # Avoid a very broad acronym search such as "ai".
+        short.extend(term for term in group[:3] if len(term) > 3)
+    # Geography-only searches can be dominated by unrelated language corpora.
+    short.sort(key=lambda term: term in {"artificial intelligence", "machine learning", "deep learning"})
+    return _dedupe_queries(short + expanded + _scope_terms(gap)[:2] + seeds)
+
+
+async def _read_dataset_card(client, dataset_id, timeout):
+    """Read bounded public README evidence, never a user-supplied URL."""
+    if not _DATASET_ID_RE.fullmatch(dataset_id):
+        return ""
+    url = f"https://huggingface.co/datasets/{dataset_id}/resolve/main/README.md"
+    try:
+        async with client.stream("GET", url, timeout=timeout) as response:
+            if response.status_code != 200:
+                return ""
+            content = bytearray()
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk[:max(0, 128_000 - len(content))])
+                if len(content) >= 128_000:
+                    break
+            return content.decode("utf-8", errors="replace")
+    except httpx.HTTPError:
+        return ""
 
 
 async def _expand_gap_queries(
@@ -234,7 +274,11 @@ async def _expand_gap_queries(
         "Trả concept_groups: 2-4 nhóm khái niệm cốt lõi bắt buộc của CHỦ ĐỀ PROJECT. Mỗi nhóm là "
         "danh sách từ/cụm đồng nghĩa tiếng Việt không dấu và tiếng Anh. Các nhóm thể hiện các khía cạnh "
         "khác nhau như vấn đề, đối tượng, biến nghiên cứu; không lặp cùng ý hoặc thêm ý ngoài chủ đề. "
-        "Địa điểm/thời gian chỉ để rà soát phạm vi, không đưa thành nhóm bắt buộc. "
+        "Chỉ tạo nhóm cho khái niệm bắt buộc; không thêm survey hay phương pháp nếu đề tài không yêu cầu. "
+        "Không tạo nhóm riêng cho từ chỉ quan hệ như ảnh hưởng, tác động, impact, effect, influence; "
+        "đây không phải đối tượng dữ liệu. Với AI và nông nghiệp, nhóm AI gồm cả machine learning, deep learning, LLM; "
+        "nhóm nông nghiệp gồm agriculture, agricultural, farming và tên cây trồng liên quan. "
+        "Địa bàn tách khỏi nhóm khái niệm và là điều kiện lọc bắt buộc. Ưu tiên truy vấn kết hợp chủ đề với địa bàn. "
         "Trả thêm scope_terms: các tên/biến thể tiếng Anh và tiếng Việt không dấu của địa bàn trong topic; "
         "để rỗng nếu topic không giới hạn địa bàn. Dùng từ đồng nghĩa về cách đo biến nhưng không khẳng định "
         "chỉ số cảm nhận hoặc biến thay thế là kết quả đo khách quan. "
@@ -245,6 +289,8 @@ async def _expand_gap_queries(
     groups = [[_normalized_text(term) for term in group if 2 <= len(str(term).strip()) <= 100] for group in result.concept_groups]
     groups = [list(dict.fromkeys(term for term in group if len(term) >= 2)) for group in groups]
     groups = [group for group in groups if group]
+    relation_terms = {"anh huong", "tac dong", "impact", "impacts", "effect", "effects", "influence", "relationship"}
+    groups = [group for group in groups if not set(group).issubset(relation_terms)]
     if len(groups) >= 2 and "_search_concept_groups" not in gap:
         gap["_search_concept_groups"] = groups
     if "_search_scope_terms" not in gap:
@@ -255,7 +301,9 @@ async def _expand_gap_queries(
 def _to_candidate(item: dict[str, Any], queries: list[str]) -> dict[str, Any]:
     card = item.get("cardData") or {}
     dataset_id = str(item.get("id") or "")
-    description = card.get("short_description") or card.get("description") or ""
+    description = " ".join(str(value) for value in (
+        card.get("short_description"), card.get("description"), item.get("description")
+    ) if value)
     description = re.sub(r"\s+", " ", str(description)).strip()
     search_text = _normalized_text(" ".join([
         dataset_id,
@@ -300,13 +348,27 @@ def _to_candidate(item: dict[str, Any], queries: list[str]) -> dict[str, Any]:
 
 def _candidate_relevance(candidate, gap):
     """Require evidence in metadata, independently of LLM-generated search terms."""
-    text = _normalized_text(" ".join([candidate["dataset_id"], candidate["description"],
+    # Persona generators mention many occupations, but those mentions do not
+    # make their synthetic profiles an observed sample for domain research.
+    title = _normalized_text(candidate.get("title", ""))
+    topic = _normalized_text(_search_topic(gap))
+    persona_terms = ("persona", "personas", "synthetic profiles")
+    if any(_has_phrase(title, term) for term in persona_terms) and not any(
+        _has_phrase(topic, term) for term in persona_terms
+    ):
+        candidate["_rejection_reasons"] = ["synthetic_persona_dataset"]
+        return False
+    text = _normalized_text(" ".join([candidate["dataset_id"], candidate["description"], candidate.get("_card_text", ""),
         " ".join(candidate["tags"]), " ".join(candidate["task_categories"])]))
     groups = gap.get("_search_concept_groups") or []
     if groups:
         evidence = [[term for term in group if _has_phrase(text, term)] for group in groups]
         matched_count = sum(bool(group) for group in evidence)
-        if matched_count < 2 or matched_count / len(groups) < .5:
+        if matched_count != len(groups):
+            candidate["_rejection_reasons"] = [
+                "missing_concept_group:" + " / ".join(group[:4])
+                for group, matches in zip(groups, evidence) if not matches
+            ]
             return False
         score = sum(bool(group) for group in evidence) / len(groups)
         matched = [term for group in evidence for term in group]
@@ -316,6 +378,7 @@ def _candidate_relevance(candidate, gap):
         matched = sorted(terms & set(text.split()))
         score = len(matched) / max(1, len(terms))
         if len(matched) < 2 or score < .3:
+            candidate["_rejection_reasons"] = ["insufficient_topic_metadata_match"]
             return False
     candidate["topic_match_score"] = round(score, 3)
     candidate["gap_match_score"] = round(score, 3)
@@ -323,9 +386,10 @@ def _candidate_relevance(candidate, gap):
         "concept_groups": groups}
     missing = [group for group, matches in zip(groups, evidence) if not matches] if groups else []
     candidate["missing_topic_concepts"] = missing
-    scope_terms = gap.get("_search_scope_terms", [])
+    scope_terms = _scope_terms(gap)
     scope_matches = [term for term in scope_terms if _has_phrase(text, term)]
     candidate["scope_match"] = "mentioned_in_metadata" if scope_matches else "unverified" if scope_terms else "not_specified"
+    candidate["scope_verification_required"] = bool(scope_terms and not scope_matches)
     candidate["relevance_evidence"]["scope_terms_matched"] = scope_matches
     if scope_terms:
         candidate["topic_match_score"] = candidate["gap_match_score"] = round(.9*score + (.1 if scope_matches else 0), 3)
@@ -334,7 +398,7 @@ def _candidate_relevance(candidate, gap):
     candidate["relevance_note"] = ("Khớp một phần chủ đề; chưa xác nhận các khái niệm: " + "; ".join(" / ".join(g[:3]) for g in missing) + ". Cần kiểm tra biến trước khi dùng."
         if missing else "Khớp khái niệm của chủ đề project trong metadata; cần xác minh biến, đối tượng, địa bàn và giấy phép.")
     if scope_terms and not scope_matches:
-        candidate["relevance_note"] += " Chưa xác nhận địa bàn theo đề tài."
+        candidate["relevance_note"] += " Metadata chưa nêu địa bàn; phải xác minh bằng dữ liệu tọa độ/mã địa bàn trước khi dùng."
     return True
 
 
@@ -351,11 +415,13 @@ async def discover_gap_datasets(
     of the query that retrieved the candidate.
     """
     gap = dict(gap)  # Semantic search state must not mutate the stored gap.
+    gap["_screening_rejection_samples"] = []
     description = str(gap.get("description") or "").strip()
     if len(_search_topic(gap).strip()) < 3:
         raise DataResearchError("Research gap được chọn không có mô tả hợp lệ.", 422)
     limit = max(1, min(int(limit), 20))
     max_search_seconds = max(1.0, min(float(max_search_seconds), 180.0))
+    excluded_ids = {str(value) for value in gap.get("_exclude_dataset_ids", []) if value}
 
     loop = asyncio.get_running_loop()
     started_at = loop.time()
@@ -365,6 +431,7 @@ async def discover_gap_datasets(
     query_queue: list[str] = []
     found: dict[str, dict[str, Any]] = {}
     rejected_ids: set[str] = set()
+    cards_checked: set[str] = set()
     request_errors: list[str] = []
     expansion_round = 0
     expansion_mode = "llm_with_gap_fallback"
@@ -397,6 +464,7 @@ async def discover_gap_datasets(
         query_queue.extend(_dedupe_queries(seed_queries, {
             _normalized_text(query) for query in query_queue
         }))
+        query_queue = _hub_retrieval_queries(gap, query_queue, seed_queries)
 
         from .repositories import search_mendeley
         remaining = deadline - loop.time()
@@ -404,7 +472,8 @@ async def discover_gap_datasets(
             external_timeout = min(15., max(.1, remaining * .3))
             try:
                 external = await asyncio.wait_for(search_mendeley(client, gap, query_queue, external_timeout), timeout=external_timeout)
-                found.update({candidate["dataset_id"]: candidate for candidate in external})
+                found.update({candidate["dataset_id"]: candidate for candidate in external
+                              if candidate.get("dataset_id") not in excluded_ids})
             except Exception as exc:
                 logger.warning("Research repository search failed: %s", type(exc).__name__)
                 request_errors.append("Mendeley/DataCite: " + type(exc).__name__)
@@ -461,6 +530,7 @@ async def discover_gap_datasets(
                             "sort": "downloads",
                             "direction": "-1",
                             "full": "true",
+                            "cardData": "true",
                         },
                         request_timeout=max(0.1, min(REQUEST_TIMEOUT, remaining)),
                     ),
@@ -481,18 +551,43 @@ async def discover_gap_datasets(
 
             if not isinstance(result, list):
                 continue
+            query_cards_checked = 0
             for item in result:
                 if not isinstance(item, dict) or not item.get("id"):
                     continue
                 dataset_id = str(item["id"])
                 if not _DATASET_ID_RE.fullmatch(dataset_id):
                     continue
+                if dataset_id in excluded_ids:
+                    rejected_ids.add(dataset_id)
+                    continue
                 candidate = _to_candidate(item, seed_queries)
                 # Hugging Face search already matched the query; the metadata
                 # score is an additional relevance check/ranking signal.
                 if not _candidate_relevance(candidate, gap):
-                    rejected_ids.add(dataset_id)
-                    continue
+                    # List metadata often omits both geography and study purpose.
+                    # Check the card before rejecting; all reads share the deadline.
+                    remaining = deadline - loop.time()
+                    if dataset_id not in cards_checked and len(cards_checked) < 24 and query_cards_checked < 3 and remaining > .2:
+                        cards_checked.add(dataset_id)
+                        query_cards_checked += 1
+                        try:
+                            candidate["_card_text"] = await asyncio.wait_for(
+                                _read_dataset_card(client, dataset_id, min(3., remaining)),
+                                timeout=min(3., remaining),
+                            )
+                        except asyncio.TimeoutError:
+                            candidate["_card_text"] = ""
+                    if not _candidate_relevance(candidate, gap):
+                        rejected_ids.add(dataset_id)
+                        if len(gap["_screening_rejection_samples"]) < 20:
+                            gap["_screening_rejection_samples"].append({
+                                "dataset_id": dataset_id, "title": candidate.get("title", ""),
+                                "provider": "Hugging Face",
+                                "reasons": candidate.get("_rejection_reasons", [])
+                            })
+                        continue
+                candidate.pop("_card_text", None)
                 candidate["discovered_by_query"] = query
                 existing = found.get(dataset_id)
                 if existing is None:
@@ -538,8 +633,12 @@ async def discover_gap_datasets(
         "requested_count": limit,
         "datasets": candidates,
         "search": {
-            "strategy": "Project-topic queries and dynamic concept groups; gap as supplementary context; metadata evidence required",
+            "strategy": ("Per-variable queries with query expansion; providers screened independently"
+                         if gap.get("_data_queries") else
+                         "Project-topic queries and dynamic concept groups; gap as supplementary context; metadata evidence required"),
+            "screening_scope": "single_data_need" if gap.get("_search_concept_groups") else "project_topic",
             "topic_concept_groups": gap.get("_search_concept_groups", []),
+            "required_scope_terms": _scope_terms(gap),
             "query_expansion_mode": expansion_mode,
             "queries_used": used_queries,
             "searched_query_count": len(used_queries),
@@ -550,9 +649,11 @@ async def discover_gap_datasets(
             "request_errors": request_errors[:5],
             "english_fallback_queries": _dataset_short_queries(gap),
             "rejected_irrelevant_count": len(rejected_ids),
+            "screening_rejection_samples": gap.get("_screening_rejection_samples", []),
+            "dataset_cards_checked": len(cards_checked),
             "insufficient_relevant_results": len(candidates) < limit,
             "sources_searched": ["Hugging Face", "Mendeley Data / DataCite"],
-            "note": "Không có kết quả không chứng minh dữ liệu không tồn tại. Ứng viên khớp một phần không bảo đảm đo được toàn bộ đề tài.",
+            "note": "Không có kết quả không chứng minh dữ liệu không tồn tại. Chỉ giữ ứng viên khớp các khái niệm bắt buộc và địa bàn trong metadata; cần xác minh phạm vi và biến trong dữ liệu thực tế.",
         },
         "review_note": (
             "Danh sách được tìm theo chủ đề project; research gap bổ sung yêu cầu. "
@@ -749,10 +850,17 @@ async def _download_checked(client: httpx.AsyncClient, url: str, remaining_bytes
         raise DataResearchError("Không tải được file dataset. Hãy thử lại hoặc chọn split khác.", 502) from exc
 
 
+def _check_transfer_cancelled(budget):
+    flag = budget.get("_cancelled")
+    if flag is not None and flag.is_set():
+        raise DataResearchError("Đã dừng đọc Parquet theo yêu cầu hoặc giới hạn thời gian.", 499)
+
+
 class _RemoteParquetReader(io.RawIOBase):
     """Bounded HTTP Range reader: never download the complete Parquet shard."""
 
     def __init__(self, client, url: str, budget: dict[str, int]):
+        _check_transfer_cancelled(budget)
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         if parsed.scheme != "https" or not (host == "huggingface.co" or host.endswith(".huggingface.co") or host == "hf.co" or host.endswith(".hf.co")):
@@ -794,6 +902,7 @@ class _RemoteParquetReader(io.RawIOBase):
         return pos
 
     def read(self, size=-1):
+        _check_transfer_cancelled(self.budget)
         if self.pos >= self.length:
             return b""
         if size is None or size < 0:
@@ -818,6 +927,7 @@ class _RemoteParquetReader(io.RawIOBase):
                     raise DataResearchError("Máy chủ không hỗ trợ HTTP Range cho file Parquet; đã ngừng để tránh tải toàn bộ file.", 422)
                 chunks, received = [], 0
                 for chunk in response.iter_bytes():
+                    _check_transfer_cancelled(self.budget)
                     received += len(chunk)
                     if received > fetch_size:
                         raise DataResearchError("Nguồn Parquet trả về nhiều dữ liệu hơn vùng yêu cầu.", 502)
@@ -874,6 +984,25 @@ def _project_record(record, columns):
 async def download_dataset_dataframe(
     dataset_id: str, config: str, split: str, max_rows: int = 50_000
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    dataset_id = validate_dataset_id(dataset_id)
+    if dataset_id.startswith("mendeley:"):
+        from .repositories import download
+        return await download(dataset_id, config, split, max_rows)
+    # Range reads and Parquet decoding below use a synchronous HTTP client.
+    # Keep them off the API/worker loop so progress and leases remain responsive.
+    from threading import Event
+    cancelled = Event()
+    try:
+        return await asyncio.to_thread(lambda: asyncio.run(
+            _download_hf_dataframe(dataset_id, config, split, max_rows, _cancelled=cancelled)))
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+
+
+async def _download_hf_dataframe(
+    dataset_id: str, config: str, split: str, max_rows: int = 50_000, _cancelled=None
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Bounded remote Parquet column reads and deterministic reservoir sampling.
 
     Avoids downloading full image-heavy shards. Only scalar columns are loaded.
@@ -903,7 +1032,7 @@ async def download_dataset_dataframe(
     if len(files) > MAX_PARQUET_FILES:
         raise DataResearchError(f"Split có hơn {MAX_PARQUET_FILES} file; chưa thể phân tích an toàn.", 413)
 
-    budget = {"used": 0}
+    budget = {"used": 0, "_cancelled": _cancelled}
     rng = random.Random(42)
     reservoir = []
     seen_rows = 0
@@ -932,6 +1061,7 @@ async def download_dataset_dataframe(
                 elif set(columns) != set(safe):
                     raise DataResearchError("Các file Parquet có schema bảng không đồng nhất.", 422)
                 for batch in parquet.iter_batches(batch_size=256, columns=columns):
+                    _check_transfer_cancelled(budget)
                     for record in batch.to_pylist():
                         record = _project_record(record, columns)
                         seen_rows += 1
@@ -1279,7 +1409,9 @@ def analyze_dataframe(
         for col in numeric_cols[:5]:
             summary = column_summaries[col]
             if summary.get("n", 0):
-                highlights.append(f"{col}: mean={summary.get('mean')}, SD={summary.get('std')}, median={summary.get('median')}")
+                def readable(value):
+                    return f"{value:.2f}".replace(".", ",") if isinstance(value, (int, float)) else "chưa tính được"
+                highlights.append(f"{col}: trung bình {readable(summary.get('mean'))}, độ lệch chuẩn {readable(summary.get('std'))}, trung vị {readable(summary.get('median'))}")
         if highlights:
             results_sentences.append("Thống kê mô tả một số biến: " + "; ".join(highlights) + ".")
     if test_results:

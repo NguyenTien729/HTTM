@@ -1,8 +1,8 @@
-"""Strict, evidence-grounded topic screening for literature search.
+"""Evidence-grounded relevance screening for literature search.
 
-LLM first decomposes the user's topic into required concepts. Each paper must
-have verifiable title/abstract evidence for EVERY required concept and their
-relationship. Any missing/invalid decision is rejected (fail closed).
+The screen favors recall while still requiring an exact excerpt that supports
+the paper's direct relevance. Planner concept labels are guidance, not literal
+phrases every abstract must contain.
 """
 import logging
 import os
@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class TopicConcepts(BaseModel):
-    concepts: list[str] = Field(description="2-4 mandatory concepts, not synonyms; preserve the topic's actual scope")
-    scope_rule: str = Field(description="One sentence specifying what direct relationship between concepts is required")
+    concepts: list[str] = Field(description="2-4 central concepts, not synonyms; preserve the topic's actual scope")
+    scope_rule: str = Field(description="One sentence explaining the direct relevance expected, without adding constraints")
 
 
 class ConceptEvidence(BaseModel):
@@ -58,7 +58,7 @@ async def extract_topic_concepts(plan: ResearchPlan) -> TopicConcepts:
         "Related background work about only X or only Y is NOT relevant. "
         "If the topic has a specified geography, that geography may be an additional concept. "
         "Return concise concepts and a strict scope_rule.\n"
-        f"TOPIC: {plan.topic}\n"
+        f"TOPIC: {plan.topic}\nUSER-SPECIFIED GEOGRAPHY: {plan.region or 'none'}\n"
     )
     result = await generate_structured(prompt, TopicConcepts)
     concepts = [c.strip() for c in result.concepts if c.strip()]
@@ -72,9 +72,13 @@ def _approve(d: RelevanceDecision, paper: Paper, concepts: TopicConcepts, thresh
         return False
     expected = {_normalized(c) for c in concepts.concepts}
     actual = [_normalized(e.concept) for e in d.concept_evidence]
-    if len(actual) != len(expected) or set(actual) != expected or len(set(actual)) != len(actual):
+    if len(set(actual)) != len(actual) or not set(actual).issubset(expected):
         return False
-    return all(e.supported and _valid_quote(e.quote, paper) for e in d.concept_evidence)
+    # Do not reject an otherwise well-grounded paper because an abstract uses a
+    # field-specific synonym for one planner label. The exact relationship
+    # excerpt remains mandatory, plus at least one independently supported core
+    # concept excerpt.
+    return any(e.supported and _valid_quote(e.quote, paper) for e in d.concept_evidence)
 
 
 async def screen_papers(
@@ -84,7 +88,7 @@ async def screen_papers(
     if not papers:
         return []
     concepts = concepts or await extract_topic_concepts(plan)
-    threshold = int(os.getenv("SEARCH_RELEVANCE_THRESHOLD", "80")) if threshold is None else threshold
+    threshold = int(os.getenv("SEARCH_RELEVANCE_THRESHOLD", "65")) if threshold is None else threshold
     threshold = max(0, min(100, threshold))
     accepted = []
     for offset in range(0, len(papers), batch_size):
@@ -94,18 +98,20 @@ async def screen_papers(
             for i, p in enumerate(batch)
         )
         prompt = (
-            "You are a STRICT scientific literature screener. Assess the ORIGINAL research topic, "
-            "not broad background relevance. A candidate must explicitly address ALL mandatory concepts "
-            "AND their DIRECT relationship. For each concept, provide an EXACT contiguous quote from "
-            "the supplied title or abstract that supports it. Also provide an EXACT quote demonstrating "
-            "the direct relationship. Quotes must be copied verbatim, not paraphrased or invented. "
-            "If the evidence is missing, set supported=false or direct_relationship=false and use an empty quote. "
-            "For application-of-X-in-Y topics, a study about X alone or Y alone MUST be rejected. "
-            "No generic background studies. If abstract is missing, use title only. "
-            "Score 0-100 heuristically; use the same candidate IDs; one decision per candidate. "
-            "Never approve merely because of broad keyword overlap.\n\n"
-            f"TOPIC: {plan.topic}\nMANDATORY CONCEPTS: {concepts.concepts}\n"
-            f"DIRECT RELATIONSHIP REQUIRED: {concepts.scope_rule}\n\nCANDIDATES:\n{entries}"
+            "You are screening candidate academic papers for a literature search. Prefer relevant candidates "
+            "over false negatives, but reject papers that only share generic keywords. A candidate is relevant "
+            "when its title/abstract directly studies the topic or provides a useful, clearly related empirical "
+            "or theoretical result. Interpret discipline-specific synonyms and equivalent wording semantically; "
+            "do not require every planner concept label to appear verbatim. For each concept, report a short "
+            "exact excerpt only when one supports it. The relationship_quote MUST be copied exactly from the "
+            "title/abstract and show the connection to the topic; never invent or paraphrase a quote. If only "
+            "the title is available, lower the score and say why. A study about one component alone is relevant "
+            "only when it clearly informs the stated relationship; mark generic background as irrelevant. "
+            "Score 0-100 for topical relevance, not paper quality. Return one decision for each supplied ID.\n\n"
+            f"TOPIC: {plan.topic}\nGEOGRAPHIC SCOPE: {plan.region or 'none specified'}\n"
+            "When a region is specified, prioritize studies set in that region. Metadata may omit the study site; "
+            "do not reject a directly relevant candidate for omission alone, but note the uncertainty in reason and score.\n"
+            f"CENTRAL CONCEPTS: {concepts.concepts}\nRELEVANCE GUIDE: {concepts.scope_rule}\n\nCANDIDATES:\n{entries}"
         )
         result = await generate_structured(prompt, RelevanceBatch)
         seen = set()

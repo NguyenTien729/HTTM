@@ -140,8 +140,14 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         if selected_gap is not None:
             metadata["research_gap"] = selected_gap
         options = {}
+        from .interpretation import dataset_guide
+        guide = await dataset_guide(list(frame.columns), metadata)
+        if guide:
+            metadata["variable_guide"] = guide
+            inferred_roles = {v["name"]: v["kind"] for v in guide.get("variables", [])}
+            options["column_roles"] = inferred_roles | request.column_roles
         if request.column_roles:
-            options["column_roles"] = request.column_roles
+            options["column_roles"] = options.get("column_roles", {}) | request.column_roles
         if request.correlation_columns is not None:
             options["correlation_columns"] = request.correlation_columns
         return analyze_dataframe(

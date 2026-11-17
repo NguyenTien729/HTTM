@@ -65,10 +65,7 @@ async def test_datacite_search_uses_scope_and_only_dataset_records(monkeypatch):
     assert any('"vietnam"' in query for query in queries)
 
 
-def test_partial_match_is_explicit_and_region_is_not_implied():
+def test_partial_match_without_required_region_is_rejected():
     context = {"project_topic": "AI student productivity Vietnam", "_search_concept_groups": [["ai"], ["students"], ["productivity"]], "_search_scope_terms": ["vietnam"]}
     candidate = service._to_candidate({"id": "example/ai-students-survey"}, [])
-    assert service._candidate_relevance(candidate, context)
-    assert candidate["match_scope"] == "partial_topic_match"
-    assert candidate["scope_match"] == "unverified"
-    assert candidate["missing_topic_concepts"] == [["productivity"]]
+    assert not service._candidate_relevance(candidate, context)

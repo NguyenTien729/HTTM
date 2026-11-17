@@ -95,7 +95,11 @@ def _compact_analysis(result: dict[str, Any]) -> dict[str, Any]:
             "missing_cells_total": overview.get("missing_cells_total"),
             "top_missing_columns": (overview.get("missing_by_column") or [])[:5],
         },
-        "column_summaries": dict(list(summaries.items())[:15]),
+        "column_summaries": summaries,
+        "variable_guide": result.get("dataset", {}).get("variable_guide", {}),
+        "correlation_pearson": result.get("correlation_pearson"),
+        "correlation_pair_counts": result.get("correlation_pair_counts"),
+        "charts": result.get("charts", []),
         "top_correlations_pearson": _top_correlations(result.get("correlation_pearson")),
         "group_test": result.get("group_test"),
         "ols_regression": result.get("ols_regression"),
@@ -205,7 +209,10 @@ def _discussion_prompt(rq: dict, themes: list[dict], analysis_json: str) -> str:
         "6. Nếu analysis_mode=structure_only, chỉ có schema/số bản ghi từ metadata Parquet: "
         "không có phân tích nội dung ảnh/audio hoặc kết quả kiểm định. Mọi giả thuyết phải có "
         "verdict=not_tested. Không coi số bản ghi trong split là số quan sát đã phân tích; "
-        "Conclusion phải nói chưa đủ bằng chứng để trả lời câu hỏi nghiên cứu."
+        "Conclusion phải nói chưa đủ bằng chứng để trả lời câu hỏi nghiên cứu.\n"
+        "7. Danh sách tương quan mạnh nhất chỉ là danh sách chọn lọc: cặp không xuất hiện KHÔNG có nghĩa "
+        "không có liên hệ hoặc liên hệ yếu. Chỉ diễn giải một cặp khi có hệ số thực tế trong ma trận. "
+        "Giải thích mã biến theo variable_guide; không tự bịa câu hỏi của thang đo hoặc gộp điểm."
     )
 
 
@@ -260,12 +267,14 @@ async def write_discussion(
     )
 
     discussion = await generate_structured(
-        _discussion_prompt(rq, themes, analysis_json), DiscussionExtraction
+        _discussion_prompt(rq, themes, analysis_json) + "\nYêu cầu chỉnh sửa; chỉ đáp ứng khi có bằng chứng: " + request.revision_notes,
+        DiscussionExtraction
     )
     if rq.get("research_basis") == "project_topic":
         discussion.hypothesis_assessments = []
     conclusion = await generate_structured(
-        _conclusion_prompt(rq, discussion), ConclusionExtraction
+        _conclusion_prompt(rq, discussion) + "\nYêu cầu chỉnh sửa; không tạo kết quả mới: " + request.revision_notes,
+        ConclusionExtraction
     )
 
     sections = [

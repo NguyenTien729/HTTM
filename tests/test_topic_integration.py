@@ -78,6 +78,9 @@ async def test_branch_a_question_data_discussion_and_pdf_without_any_gaps(review
     response = await client.post(f"/write/discussion/{rid}", json={"analysis_result": analysis})
     assert response.status_code == 200, response.text
     assert response.json()["discussion"]["hypothesis_assessments"] == []
+    async def translated(prompt, schema):
+        return schema(titles=["Kết quả học tập"])
+    monkeypatch.setattr("app.services.manuscript_language.generate_structured", translated)
     data = await export._load_paper_data(rid)
     assert data["gap"] is None
     output = tmp_path / "topic-research.pdf"

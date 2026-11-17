@@ -505,6 +505,7 @@
       <p class="sub">
         Quy trình nghiên cứu khoa học có kiểm soát • Chỉ dừng ở những bước cần quyết định của bạn
       </p>
+      <p><a href="autonomous.html">Mở hệ thống nghiên cứu & viết bài tự động →</a></p>
       <div class="layout">
         <aside class="side">
           <h2>
@@ -765,13 +766,25 @@
           const papers = (r.papers || []).slice().sort((a, b) => (b.publication_date || String(b
             .year || '')).localeCompare(a.publication_date || String(a.year || '')));
           c.paperCount = papers.length;
+          c.papers = papers;
+          const sourceTotals = {};
+          (r.search_audit?.provider_queries || []).forEach(item => {
+            const total = sourceTotals[item.source] || (sourceTotals[item.source] = {retrieved: 0, failures: 0});
+            total.retrieved += item.retrieved || 0;
+            if (item.error) total.failures += 1;
+          });
+          const sourceSummary = Object.entries(sourceTotals).map(([name, total]) =>
+            `${name}: ${total.retrieved} kết quả${total.failures ? `, lỗi ${total.failures} lượt` : ''}`).join('\n');
           const region = c.plan?.region || c.region;
           box.append(note(
-            'Kết quả được xếp mới nhất trước theo publication_date (nếu có), sau đó theo năm. ' +
-            (region ? 'Khu vực yêu cầu: ' + region + '.' : 'Không giới hạn khu vực.')));
+            'Kết quả được xếp theo độ liên quan trước, sau đó theo citation và độ mới. Hệ thống mở rộng dần phạm vi năm khi thiếu bài. ' +
+            (region ? 'Yêu cầu khu vực ' + region + ' được xét trong sàng lọc ngữ nghĩa; abstract có thể không ghi rõ địa điểm.' : 'Không giới hạn khu vực.')));
+          if (papers.length < c.count) box.append(note(
+            `Tìm được ${papers.length}/${c.count} bài mục tiêu sau khi mở rộng tìm kiếm. Có thể xem truy vấn và thống kê từng nguồn bên dưới.`, 'warning'));
           if (!papers.length) box.append(note(
             'Không có bài báo phù hợp. Có thể cần mở rộng phạm vi thời gian hoặc điều chỉnh Region.',
             'warning'));
+          box.append(detail('Thống kê nguồn tìm kiếm', sourceSummary || 'Không nhận được thống kê nguồn.'));
           const holder = el('div', {
             class: 'papers'
           });
@@ -782,6 +795,8 @@
               .publication_date || p.year || 'Không rõ ngày', p.venue || '', p.source ||
               ''
             ].filter(Boolean).join(' • ')));
+            if (p.abstract) item.append(el('p', {}, p.abstract.slice(0, 650) + (p.abstract.length > 650 ? '…' : '')));
+            if (p.citation_count) item.append(el('small', {}, `Được trích dẫn ${p.citation_count} lần theo metadata nguồn.`));
             if (p.doi) item.append(el('span', {
               class: 'pill'
             }, 'DOI: ' + p.doi));
@@ -797,7 +812,9 @@
             }, ' Xem bài báo'));
             holder.append(item)
           });
-          box.append(holder, detail('Truy vấn tìm kiếm', r.query_used || ''));
+          box.append(holder, detail('Truy vấn tìm kiếm', r.query_used || ''),
+            detail('Phạm vi và số bài qua từng lượt', (r.search_audit?.windows || []).map(w =>
+              `${w.from_year}–nay: ${w.retrieved} lấy về, ${w.after_date_filter} qua lọc ngày${w.region_mentions == null ? '' : ', ' + w.region_mentions + ' có nhắc vùng'}`).join('\n')));
           return `Tìm thấy ${r.found||0}, lưu mới ${r.saved||0} bài • ${papers.length} bài hiển thị`
         }
       }, {
@@ -805,6 +822,18 @@
         section: 'Tổng quan tài liệu',
         async run(c, box) {
           const r = await json('POST', '/analyze/' + c.pid);
+          (r.analyses || []).forEach(a => {
+            const paper = (c.papers || []).find(p => p.id === a.paper_id);
+            const basis = a.evidence_basis === 'fulltext_pdf_excerpts' ? 'trích đoạn toàn văn PDF' :
+              a.evidence_basis === 'abstract_only' ? 'abstract' : 'chưa ghi nhận phạm vi đọc';
+            const card = el('article', {class: 'paper'},
+              el('strong', {}, a.title || paper?.title || `Paper #${a.paper_id}`),
+              el('p', {}, a.plain_language_summary || a.key_finding || 'Chưa trích xuất được tóm tắt dễ hiểu.'));
+            card.append(el('small', {}, `Căn cứ: ${basis}${a.method ? ' · Phương pháp: ' + a.method : ''}${a.population ? ' · Mẫu: ' + a.population : ''}`));
+            if (a.evidence_excerpt) card.append(el('small', {}, 'Trích đoạn căn cứ: “' + a.evidence_excerpt + '”'));
+            if (a.limitation) card.append(el('small', {}, 'Giới hạn được nêu: ' + a.limitation));
+            box.append(card);
+          });
           box.append(detail('Phát hiện chính', (r.analyses || []).map(a =>
             `[${a.paper_id}] ${a.key_finding}`).join('\n\n')));
           return `${r.total_analyzed||0} bài đã phân tích • ${r.fulltext_used||0} bài dùng full-text trong lượt này`
@@ -814,8 +843,9 @@
         section: 'Tổng quan tài liệu',
         async run(c, box) {
           const r = await json('POST', '/synthesize/' + c.pid);
-          box.append(list((r.themes || []).map(t =>
-            `${t.name} (${(t.paper_ids||[]).length} paper)`)));
+          (r.themes || []).forEach(t => box.append(el('article', {class: 'paper'},
+            el('strong', {}, t.name), el('p', {}, t.description || 'Chưa có phần giải thích.'),
+            el('small', {}, `Bằng chứng: ${(t.paper_ids || []).length} nghiên cứu [${(t.paper_ids || []).join(', ')}]`))));
           return (r.themes || []).length + ' themes'
         }
       }, {

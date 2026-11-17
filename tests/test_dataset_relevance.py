@@ -33,7 +33,7 @@ def test_relevance_uses_dynamic_concepts_not_a_fixed_education_filter():
     assert not service._candidate_relevance(candidate("example/student-grades", "Academic performance survey"), context)
     assert not service._candidate_relevance(candidate("example/chatgpt", "AI instruction tuning"), context)
     assert not service._candidate_relevance(candidate("example/education-llm", "AI education question answering benchmark"), context)
-    partial = candidate("example/ai-survey", "Survey of ChatGPT usage and academic performance among university students")
+    partial = candidate("example/ai-survey", "Survey of ChatGPT usage and academic performance among university students in Vietnam")
     assert service._candidate_relevance(partial, context)
     assert partial["match_scope"] == "project_topic_metadata_match"
     local = candidate("example/vietnam-students-ai", "Vietnamese university students survey of ChatGPT usage and learning outcomes")
@@ -66,7 +66,7 @@ def test_llm_builds_concepts_from_project_topic(monkeypatch):
     prompts = []
     async def generate(prompt, schema):
         prompts.append(prompt)
-        return schema(queries=["credit card fraud"], concept_groups=[["credit card", "the tin dung"], ["fraud", "gian lan"]])
+        return schema(queries=["credit card fraud"], concept_groups=[["credit card", "the tin dung"], ["fraud", "gian lan"], ["impact", "anh huong"]])
     monkeypatch.setattr(llm, "generate_structured", generate)
     context = {"project_topic": "Phát hiện gian lận thẻ tín dụng", "description": "Gap about limited populations"}
     queries = asyncio.run(service._expand_gap_queries(context, [], 1))
@@ -76,6 +76,9 @@ def test_llm_builds_concepts_from_project_topic(monkeypatch):
 
 
 def test_discovery_does_not_fill_quota_with_irrelevant_or_unmatched_results(monkeypatch):
+    async def read_card(*args):
+        return ""
+    monkeypatch.setattr(service, "_read_dataset_card", read_card)
     async def expand(*args):
         return ["image classification"]  # Even a bad expansion cannot override relevance.
     async def search(*args, **kwargs):
@@ -87,3 +90,83 @@ def test_discovery_does_not_fill_quota_with_irrelevant_or_unmatched_results(monk
     assert result["datasets"] == []
     assert result["search"]["rejected_irrelevant_count"] == 2
     assert result["search"]["stop_reason"] == "query_exhausted"
+
+
+@pytest.mark.parametrize("description,accepted", [
+    ("AI adoption and agriculture productivity in Vietnam", True),
+    ("Artificial intelligence for agriculture in Viet Nam", True),
+    ("AI adoption and agriculture productivity in India", False),
+    ("AI adoption and agriculture productivity", False),
+    ("Agriculture productivity in Vietnam", False),
+    ("AI adoption among students in Vietnam", False),
+])
+def test_agricultural_ai_requires_both_topic_and_geography(description, accepted):
+    context = {"project_topic": "Ảnh hưởng của AI tới nông nghiệp Việt Nam",
+               "_search_concept_groups": [["ai", "artificial intelligence"], ["agriculture", "nong nghiep"]]}
+    assert service._candidate_relevance(candidate("example/survey", description), context) is accepted
+
+
+def test_all_required_concepts_must_match():
+    context = {"project_topic": "AI agriculture productivity",
+               "_search_concept_groups": [["ai"], ["agriculture"], ["productivity"]]}
+    assert not service._candidate_relevance(candidate("example/survey", "AI agriculture benchmark"), context)
+
+
+def test_vietnam_scope_survives_failed_or_empty_expansion():
+    context = {"project_topic": "AI agriculture Việt Nam", "_search_scope_terms": []}
+    assert not service._candidate_relevance(candidate("example/survey", "AI agriculture"), context)
+    assert service._candidate_relevance(candidate("example/survey", "AI agriculture Viet Nam"), context)
+
+
+def test_hub_queries_include_short_domain_terms():
+    context = {"project_topic": "AI agriculture Vietnam",
+               "_search_concept_groups": [["ai", "artificial intelligence"], ["agriculture", "farming"]]}
+    queries = service._hub_retrieval_queries(context, ["AI agriculture Vietnam"], [])
+    assert queries[0] == "agriculture"
+    assert "vietnam" in queries
+    assert "ai" not in queries
+
+
+def test_card_can_supply_missing_geographic_and_topic_evidence():
+    context = {"project_topic": "AI agriculture Vietnam",
+               "_search_concept_groups": [["ai", "machine learning"], ["agriculture"]]}
+    item = candidate("example/rice-yield", "Rice observations")
+    assert not service._candidate_relevance(item, context)
+    item["_card_text"] = "Agriculture observations collected in Vietnam for machine learning."
+    assert service._candidate_relevance(item, context)
+    assert item["scope_match"] == "mentioned_in_metadata"
+
+
+def test_synthetic_personas_are_not_an_agricultural_study_sample():
+    context = {"project_topic": "AI agriculture Vietnam",
+               "_search_concept_groups": [["ai"], ["agriculture"]]}
+    item = candidate("example/personas-vietnam", "Synthetic profiles")
+    item["_card_text"] = "AI agriculture occupations in Vietnam"
+    assert not service._candidate_relevance(item, context)
+
+
+def test_discovery_reads_card_before_rejecting_sparse_metadata(monkeypatch):
+    from app.data_research import repositories
+
+    async def expand(context, *args):
+        context["_search_concept_groups"] = [["ai", "machine learning"], ["agriculture"]]
+        return ["AI agriculture Vietnam"]
+
+    async def search(*args, **kwargs):
+        return [{"id": "example/rice-yield"}]
+
+    async def read(*args):
+        return "Machine learning for agriculture in Vietnam"
+
+    async def external(*args):
+        return []
+
+    monkeypatch.setattr(service, "_expand_gap_queries", expand)
+    monkeypatch.setattr(service, "_get_json", search)
+    monkeypatch.setattr(service, "_read_dataset_card", read)
+    monkeypatch.setattr(repositories, "search_mendeley", external)
+    result = asyncio.run(service.discover_gap_datasets(
+        {"project_topic": "AI agriculture Vietnam"}, limit=1, max_search_seconds=5))
+    assert result["count"] == 1
+    assert result["search"]["dataset_cards_checked"] == 1
+    assert "_card_text" not in result["datasets"][0]

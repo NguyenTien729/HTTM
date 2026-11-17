@@ -103,6 +103,7 @@ async def _write_one_theme(theme: dict, rq: dict) -> ThemeParagraph:
         "Không dùng paper_id khác. Nếu evidence chưa đủ, ghi rõ giới hạn. "
         "Trả về JSON có đúng field paragraph.\n\n"
         f"Research question: {rq['rq_text']}\n"
+        f"Yêu cầu chỉnh sửa, giữ nguyên tính trung thực của bằng chứng: {rq.get('revision_notes', '')}\n"
         f"Theme: {theme['name']}\nDescription: {theme['description']}\n"
         f"Evidence:\n{_evidence_text(theme)}"
     )
@@ -135,6 +136,7 @@ async def _write_final_sections(themes: list[ThemeParagraph], rq: dict) -> _Fina
         "2) gap_paragraph: kết nối tổng quan tới research gap và câu hỏi nghiên cứu. "
         "Chỉ trích dẫn [paper_id] đã xuất hiện trong các đoạn cung cấp. "
         "Không tự tạo dữ liệu hoặc kết quả. Trả về JSON với đúng hai field trên.\n\n"
+        f"Yêu cầu chỉnh sửa, không tạo bằng chứng: {rq.get('revision_notes', '')}\n"
         f"Research gap ({rq['gap_type']}): {rq['gap_description']}\n"
         f"Research question: {rq['rq_text']}\n"
         f"Theme summaries:\n{compact}"
@@ -143,8 +145,9 @@ async def _write_final_sections(themes: list[ThemeParagraph], rq: dict) -> _Fina
 
 
 @router.post("/{research_question_id}", response_model=WriteRelatedWorkResponse)
-async def write_related_work(research_question_id: int) -> WriteRelatedWorkResponse:
+async def write_related_work(research_question_id: int, revision_notes: str = "") -> WriteRelatedWorkResponse:
     rq = await _load_research_question(research_question_id)
+    rq["revision_notes"] = revision_notes[:4000]
     project_id = rq["project_id"]
     themes = await _load_themes_with_evidence(project_id)
     if not themes:

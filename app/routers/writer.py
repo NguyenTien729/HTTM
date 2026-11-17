@@ -104,7 +104,7 @@ def _verify_citations(sections: list[str], valid_paper_ids: set[int]) -> tuple[l
 
 
 @router.post("/{research_question_id}", response_model=WriteIntroductionResponse)
-async def write_introduction(research_question_id: int) -> WriteIntroductionResponse:
+async def write_introduction(research_question_id: int, revision_notes: str = "") -> WriteIntroductionResponse:
     """Viết Introduction cho 1 research question đã sinh."""
     rq = await _load_research_question(research_question_id)
     project_id = rq["project_id"]
@@ -137,6 +137,8 @@ async def write_introduction(research_question_id: int) -> WriteIntroductionResp
         "Nếu không có evidence cụ thể cho 1 câu, không thêm citation cho câu đó."
     )
 
+    if revision_notes:
+        prompt += "\nYêu cầu chỉnh sửa của người nghiên cứu (không được bịa bằng chứng để đáp ứng): " + revision_notes[:4000]
     extracted = await generate_structured(prompt, IntroductionExtraction)
 
     valid_paper_ids = {e["paper_id"] for e in evidence}

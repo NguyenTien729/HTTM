@@ -23,7 +23,7 @@ def parse_id(dataset_id):
 
 
 async def search_mendeley(client, context, queries, timeout):
-    from .service import _get_json, _to_candidate, _candidate_relevance
+    from .service import _get_json, _to_candidate, _candidate_relevance, _scope_terms
     groups = context.get("_search_concept_groups", [])
     expressions = []
     if len(groups) >= 2:
@@ -37,7 +37,7 @@ async def search_mendeley(client, context, queries, timeout):
     # Retrieval must also find partial matches regardless of LLM group order.
     concepts_query = "(" + " OR ".join(f"({a} AND {b})" for a, b in combinations(expressions, 2)) + ")" if len(expressions) >= 2 else expressions[0]
     base_query = "types.resourceTypeGeneral:Dataset AND " + concepts_query
-    scopes = context.get("_search_scope_terms", [])
+    scopes = _scope_terms(context)
     search_queries = [base_query]
     if scopes:
         search_queries.insert(0, base_query + " AND (" + " OR ".join('"' + t.replace('"', '') + '"' for t in scopes[:8]) + ")")
@@ -54,10 +54,20 @@ async def search_mendeley(client, context, queries, timeout):
         code, version = match.groups()
         title = " ".join(t.get("title", "") for t in item.get("titles", []))
         description = " ".join(d.get("description", "") for d in item.get("descriptions", []))
+        # DataCite stores geography and domain evidence outside descriptions too.
+        subjects = " ".join(str(s.get("subject") or "") for s in item.get("subjects", []))
+        places = " ".join(str(g.get("geoLocationPlace") or "") for g in item.get("geoLocations", []))
         # Classify against the full title/description, not a synthetic repository ID.
         candidate = _to_candidate({"id": title, "cardData": {"description": description}}, queries)
+        candidate["_card_text"] = " ".join((title, description, subjects, places))
         if not _candidate_relevance(candidate, context):
+            samples = context.setdefault("_screening_rejection_samples", [])
+            if len(samples) < 20:
+                samples.append({"dataset_id": f"mendeley:{code}:{version}", "title": title,
+                                "provider": "Mendeley Data / DataCite",
+                                "reasons": candidate.get("_rejection_reasons", [])})
             continue
+        candidate.pop("_card_text", None)
         candidate.update(dataset_id=f"mendeley:{code}:{version}", title=title, doi=doi,
             description=re.sub(r"<[^>]+>", " ", description)[:6000], source="Mendeley Data / DataCite",
             dataset_url=f"https://data.mendeley.com/datasets/{code}/{version}",
@@ -165,7 +175,8 @@ async def download(dataset_id, config=None, split="0", max_rows=50000):
         "rows_analyzed": len(frame), "rows_in_selected_split": count, "sampled": count > max_rows,
         "sampling_method": "Random sampling, seed=42" if count > max_rows else "Toàn bộ bảng được chọn",
         "downloaded_bytes": len(raw), "analysis_mode": "tabular", "license": info.get("licence", {}).get("short_name"),
-        "source_description": info.get("description", ""), "available_files": [{"id": f["id"], "filename": f["filename"]} for f in files]}
+        "source_description": info.get("description", ""), "source_method": info.get("method", ""),
+        "available_files": [{"id": f["id"], "filename": f["filename"]} for f in files]}
 
 
 async def inspect(dataset_id, config=None, split=None):

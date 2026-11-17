@@ -1,5 +1,9 @@
 # Hướng A và hướng B của HTTM
 
+Luồng nghiên cứu và viết bài tự động mới mở tại `/` hoặc `/ui/autonomous.html`:
+xem [README_AUTONOMOUS.md](README_AUTONOMOUS.md). Các hướng thao tác từng bước dưới đây
+vẫn được giữ tại `/ui/index.html`.
+
 ## Hướng A — nghiên cứu trực tiếp theo đề tài
 
 Đây là lựa chọn mặc định khi tạo project trên giao diện.

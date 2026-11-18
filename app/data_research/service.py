@@ -201,8 +201,21 @@ def _scope_terms(gap):
     return list(dict.fromkeys(t for t in terms if t))
 
 
+_COUNTRY_ALIASES = {"viet nam": "vietnam", "usa": "united states", "uk": "united kingdom"}
+
+
+def _country(name):
+    return _COUNTRY_ALIASES.get(name, name)
+
+
 def _explicit_geography_conflict(candidate, gap):
-    """Reject an explicitly different continent while keeping global/unknown sources reviewable."""
+    """Reject sources explicitly about another place; keep global/unknown sources reviewable.
+
+    A source is rejected when its title names a different continent, or when its
+    metadata names another specific country without ever naming the target
+    country. Sources that name no place stay as candidates with a scope warning,
+    and multi-country sources that include the target country are kept.
+    """
     scope = _normalized_text(" ".join(_scope_terms(gap)) or _search_topic(gap))
     target_continent = next((continent for country, continent in _COUNTRY_CONTINENTS.items()
                              if _has_phrase(scope, country)), None)
@@ -214,6 +227,15 @@ def _explicit_geography_conflict(candidate, gap):
             continue
         if any(_has_phrase(title, marker) for marker in markers):
             return "title_explicitly_outside_target_continent:" + continent
+    countries = [name for name in _COUNTRY_CONTINENTS if name not in _CONTINENT_MARKERS]
+    targets = {_country(name) for name in countries if _has_phrase(scope, name)}
+    if not targets:
+        return None
+    text = _normalized_text(" ".join(str(candidate.get(key) or "") for key in (
+        "dataset_id", "title", "description", "_card_text")))
+    mentioned = {_country(name) for name in countries if _has_phrase(text, name)}
+    if mentioned and not mentioned & targets:
+        return "metadata_explicitly_other_country:" + ", ".join(sorted(mentioned))
     return None
 
 

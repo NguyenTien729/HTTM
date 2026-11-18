@@ -186,7 +186,16 @@ async def test_analysis_cannot_run_before_design_approval(collection):
         await pipeline.analyze(value)
 
 
-async def test_approved_two_source_analysis_computes_statistics(collection):
+async def test_approved_two_source_analysis_computes_statistics(collection, monkeypatch):
+    # analyze() also drafts the paper story; isolate it from PostgreSQL and the LLM.
+    from app.autonomous.models import PaperStory
+    async def no_papers(project_id):
+        return []
+    async def story(prompt, schema):
+        assert schema is PaperStory
+        return PaperStory(thesis="Liên hệ quan sát", research_gap="Kiểm thử")
+    monkeypatch.setattr(pipeline, "evidence", no_papers)
+    monkeypatch.setattr(pipeline, "generate_structured", story)
     value = decide(run(), Decision(expected_version=5, action="approve"))
     value["stage"], value["status"] = "design", "awaiting_design_approval"
     value = decide(value, Decision(expected_version=5, action="approve"))
@@ -209,7 +218,10 @@ def test_declared_time_filters_are_applied_before_join_and_audited(collection):
     for source in spec["sources"]:
         source["filters"] = [{"column": "year", "operator": "between", "values": [2021, 2025],
                               "rationale": "Giới hạn thời kỳ chung"}]
-    frame, report = data.prepare_data(1, brief(), spec, collection, 100)
+    # The plan covers 2021–2025, so dropping the 2020 rows is a valid scope filter.
+    plan = brief()
+    plan["time_scope"] = "2021–2025"
+    frame, report = data.prepare_data(1, plan, spec, collection, 100)
     assert len(frame) == 5 and frame["year"].min() == 2021
     assert report["provenance"][0]["rows_before_filter"] == 6
     assert report["provenance"][0]["rows"] == 5

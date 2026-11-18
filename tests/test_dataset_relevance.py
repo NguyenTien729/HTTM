@@ -96,14 +96,29 @@ def test_discovery_does_not_fill_quota_with_irrelevant_or_unmatched_results(monk
     ("AI adoption and agriculture productivity in Vietnam", True),
     ("Artificial intelligence for agriculture in Viet Nam", True),
     ("AI adoption and agriculture productivity in India", False),
-    ("AI adoption and agriculture productivity", False),
+    # No place named: kept as a candidate, but flagged for scope verification.
+    ("AI adoption and agriculture productivity", True),
     ("Agriculture productivity in Vietnam", False),
     ("AI adoption among students in Vietnam", False),
 ])
 def test_agricultural_ai_requires_both_topic_and_geography(description, accepted):
     context = {"project_topic": "Ảnh hưởng của AI tới nông nghiệp Việt Nam",
                "_search_concept_groups": [["ai", "artificial intelligence"], ["agriculture", "nong nghiep"]]}
-    assert service._candidate_relevance(candidate("example/survey", description), context) is accepted
+    item = candidate("example/survey", description)
+    assert service._candidate_relevance(item, context) is accepted
+    if accepted:
+        names_vietnam = "viet nam" in description.lower() or "vietnam" in description.lower()
+        assert item["scope_verification_required"] is (not names_vietnam)
+
+
+def test_source_about_another_country_is_rejected_unless_it_includes_the_target():
+    context = {"project_topic": "Ảnh hưởng của AI tới nông nghiệp Việt Nam",
+               "_search_concept_groups": [["ai"], ["agriculture"]]}
+    rejected = candidate("example/survey", "AI and agriculture survey of farmers in China and India")
+    assert service._candidate_relevance(rejected, context) is False
+    assert rejected["_rejection_reasons"][0].startswith("metadata_explicitly_other_country")
+    regional = candidate("example/survey", "AI and agriculture panel for Thailand, Vietnam and Indonesia")
+    assert service._candidate_relevance(regional, context) is True
 
 
 def test_all_required_concepts_must_match():
@@ -114,8 +129,13 @@ def test_all_required_concepts_must_match():
 
 def test_vietnam_scope_survives_failed_or_empty_expansion():
     context = {"project_topic": "AI agriculture Việt Nam", "_search_scope_terms": []}
-    assert not service._candidate_relevance(candidate("example/survey", "AI agriculture"), context)
-    assert service._candidate_relevance(candidate("example/survey", "AI agriculture Viet Nam"), context)
+    unknown = candidate("example/survey", "AI agriculture")
+    assert service._candidate_relevance(unknown, context)
+    assert unknown["scope_verification_required"] is True
+    named = candidate("example/survey", "AI agriculture Viet Nam")
+    assert service._candidate_relevance(named, context)
+    assert named["scope_verification_required"] is False
+    assert not service._candidate_relevance(candidate("example/survey", "AI agriculture India"), context)
 
 
 def test_hub_queries_include_short_domain_terms():

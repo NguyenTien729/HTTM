@@ -96,7 +96,9 @@ async def test_analyze_falls_back_to_abstract(client, monkeypatch):
 
     async def fake_llm(prompt, schema):
         prompts.append(prompt)
-        return PaperAnalysisExtraction(key_finding="AI giúp học tốt hơn", method="Survey")
+        # A complete extraction: an empty plain-language summary is re-analysed by design.
+        return PaperAnalysisExtraction(key_finding="AI giúp học tốt hơn", method="Survey",
+                                       plain_language_summary="Nghiên cứu cho thấy AI hỗ trợ việc học.")
     monkeypatch.setattr("app.routers.analysis.generate_structured", fake_llm)
 
     r = await client.post(f"/analyze/{pid}")

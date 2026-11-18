@@ -115,7 +115,8 @@ def read_table(raw: bytes, filename: str, sheet: str | None = None, header_row: 
             if target not in workbook.sheet_names:
                 raise UploadError("Không có trang tính '" + target + "'. Các trang có trong file: "
                                   + ", ".join(workbook.sheet_names) + ".")
-            frame = workbook.parse(target, header=header_row - 1, dtype=object, nrows=MAX_UPLOAD_ROWS + 1)
+            frame = pd.read_excel(workbook, sheet_name=target, header=header_row - 1, dtype=object,
+                                  nrows=MAX_UPLOAD_ROWS + 1)
             info.update(sheet=target, sheets=list(workbook.sheet_names))
         elif extension == ".parquet":
             frame = pd.read_parquet(io.BytesIO(raw))

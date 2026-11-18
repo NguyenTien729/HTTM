@@ -16,8 +16,13 @@ def mock_search_screening(monkeypatch):
         return TopicConcepts(concepts=["AI", "students"], scope_rule="AI and student productivity")
     async def screen(papers, *args, **kwargs):
         return [(p, 90) for p in papers]
+    # Crossref is a third live provider: without this the tests hit the real API
+    # on CI (which has internet) and receive real papers.
+    async def no_crossref(*args, **kwargs):
+        return []
     monkeypatch.setattr("app.routers.search.extract_topic_concepts", concepts)
     monkeypatch.setattr("app.routers.search.screen_papers", screen)
+    monkeypatch.setattr("app.routers.search.search_crossref", no_crossref)
 
 
 async def test_plan_create_and_get(client, monkeypatch):

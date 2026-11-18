@@ -124,6 +124,21 @@ def _numbers_in(text: str) -> list[str]:
     return _NUMBER_RE.findall(text)
 
 
+# A trailing "," or "." is punctuation unless another digit follows it.
+_VN_THOUSANDS_RE = re.compile(r"(?<![\d.,])\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\d|[.,]\d)")
+_DECIMAL_COMMA_RE = re.compile(r"(?<![\d.,])(\d+),(\d+)(?!\d|[.,]\d)")
+
+
+def _normalize_written_numbers(text: str) -> str:
+    """Vietnamese prose writes 0,3819 and 1.671,77; read them as 0.3819 and 1671.77.
+
+    Without this, "r=0,3819" was split into "0" and "3819" and reported as an
+    unverified number although it matches the analysis exactly.
+    """
+    text = _VN_THOUSANDS_RE.sub(lambda m: m.group(0).replace(".", "").replace(",", "."), text)
+    return _DECIMAL_COMMA_RE.sub(r"\1.\2", text)
+
+
 def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]:
     """Trả về các số xuất hiện trong text viết ra nhưng không có trong dữ liệu nguồn.
 
@@ -133,7 +148,7 @@ def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]
     source_values = [float(n) for n in _numbers_in(source_text)]
     flagged: list[str] = []
     for text in sections:
-        cleaned = _CITATION_RE.sub(" ", text)
+        cleaned = _normalize_written_numbers(_CITATION_RE.sub(" ", text))
         for token in _numbers_in(cleaned):
             has_decimal = "." in token
             value = float(token)

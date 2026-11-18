@@ -309,3 +309,60 @@ async def test_upload_endpoint_reports_bad_files_and_stale_versions(api):
             data={"expected_version": "5", "description": "ngắn"},
             files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")})
         assert short.status_code == 422
+
+
+def test_single_upload_needs_no_join_key_and_text_controls_are_dropped_not_blocking():
+    from app.autonomous.models import ResearchBrief
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "individual", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "id"), ("wage", "outcome", "USD/hour"),
+                                    ("schooling", "exposure", "years"), ("experience", "control", "years"),
+                                    ("sex", "control", "group")]], feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{x};{'male' if i % 2 else 'female'}\n"
+                   for i, (w, e, x) in enumerate([("5,1", 8, 21), ("6,7", 12, 1), ("4", 12, 4), ("7,5", 12, 17),
+                                                  ("13,1", 16, 9), ("4,45", 10, 27), ("19,5", 18, 12)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;kn;gioi\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    collection = {"sources": value["artifacts"]["user_sources"]}
+    spec = AnalysisDesign(adequate=True, rationale="Một nguồn", sources=[{"source_key": "s01", "bindings": [
+        binding("wage", "luong", "USD/hour"), binding("schooling", "hoc", "years"),
+        binding("experience", "kn", "years"), binding("sex", "gioi", "group")]}],
+        method="ols", target="wage", predictors=["schooling", "experience", "sex"]).model_dump()
+    with pytest.raises(ValueError, match="phải là cột số"):
+        data.prepare_data(1, plan, spec, collection, 100)
+    frame, report = data.prepare_data(1, plan, spec, collection, 100, drop_optional_predictors=True)
+    assert report["predictors"] == ["schooling", "experience"]
+    assert report["dropped_predictors"][0]["variable"] == "sex"
+    # A predictor that is not an optional planned variable is never silently dropped.
+    with pytest.raises(ValueError, match="không hợp lệ"):
+        data.prepare_data(1, plan, dict(spec, predictors=["schooling", "invented"]), collection, 100, True)
+
+
+async def test_design_stage_freezes_the_reduced_model_and_passes_validation(monkeypatch):
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.state import fingerprint
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "individual", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "id"), ("wage", "outcome", "USD/hour"),
+                                    ("schooling", "exposure", "years"), ("sex", "control", "group")]],
+        feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{'male' if i % 2 else 'female'}\n" for i, (w, e) in
+                   enumerate([("5,1", 8), ("6,7", 12), ("4", 11), ("7,5", 13), ("13,1", 16), ("4,45", 10), ("19,5", 18)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;gioi\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    value["artifacts"].update(research_plan=plan, data_collection={"sources": value["artifacts"]["user_sources"]},
+                              approvals=[{"stage": "research_plan", "fingerprint": fingerprint(plan)}])
+
+    async def llm(prompt, schema):
+        return AnalysisDesign(adequate=True, rationale="Một nguồn", method="ols", target="wage",
+                              predictors=["schooling", "sex"], sources=[{"source_key": "s01", "bindings": [
+                                  binding("wage", "luong", "USD/hour"), binding("schooling", "hoc", "years"),
+                                  binding("sex", "gioi", "group")]}])
+    monkeypatch.setattr(pipeline, "generate_structured", llm)
+    result = await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is True
+    assert result["predictors"] == ["schooling"] and any("sex" in item for item in result["limitations"])

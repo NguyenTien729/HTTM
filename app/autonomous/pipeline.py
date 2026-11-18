@@ -244,6 +244,8 @@ async def design(run):
             "không ghép nhiều-nhiều, không lặp biến ngoài khóa ghép. "
             "method chỉ descriptive/correlation/ols; nếu câu hỏi bắt buộc mô hình panel, time-series, spatial "
             "hoặc thiết kế nhân quả mà OLS không phù hợp, chọn unsupported và ghi missing_requirements. "
+            "predictors chỉ gồm biến đã ánh xạ tới cột SỐ; biến dạng chữ (giới tính, ngành, nghề…) ghi vào limitations, không đưa vào predictors. "
+            "Nếu chỉ dùng một nguồn thì không cần joins và không cần ánh xạ khóa ghép. "
             "Không coi các giả định là đã kiểm chứng. causal_claims_allowed=false.\n"
             + json.dumps(brief.model_dump(), ensure_ascii=False) + "\n"
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
@@ -270,7 +272,9 @@ async def design(run):
             else:
                 coverage[binding.variable]["sources"].append({"source_key": selection.source_key,
                                                                "column": binding.column})
-    uncovered = [row for row in coverage.values() if row["required"] and not row["sources"]]
+    single_source = len({selection.source_key for selection in proposed.sources}) <= 1
+    uncovered = [row for row in coverage.values() if row["required"] and not row["sources"]
+                 and not (single_source and row["role"] == "join_key")]
     validation = {"ok": False, "errors": []}
     if uncovered:
         validation["errors"].append("Snapshot chưa phủ đủ biến bắt buộc ở đúng độ phân giải.")
@@ -280,7 +284,19 @@ async def design(run):
         try:
             _, validation = await asyncio.to_thread(data.prepare_data, run["id"],
                 run["artifacts"]["research_plan"], candidate, collection,
-                run["artifacts"]["settings"]["max_rows"])
+                run["artifacts"]["settings"]["max_rows"], True)
+            if validation.get("dropped_predictors"):
+                # Freeze the reduced model into the design the user approves, then
+                # re-validate it strictly so analysis runs exactly what was approved.
+                candidate["predictors"] = validation["predictors"]
+                candidate["limitations"] = list(candidate.get("limitations", [])) + [
+                    "Không đưa vào mô hình: " + item["reason"] + " Biến này chỉ được bàn luận như hạn chế."
+                    for item in validation["dropped_predictors"]]
+                dropped = validation["dropped_predictors"]
+                _, validation = await asyncio.to_thread(data.prepare_data, run["id"],
+                    run["artifacts"]["research_plan"], candidate, collection,
+                    run["artifacts"]["settings"]["max_rows"])
+                validation["dropped_predictors"] = dropped
         except (ValueError, KeyError, TypeError) as exc:
             validation = {"ok": False, "errors": [str(exc)]}
     feasible = bool(validation.get("ok") and proposed.adequate and proposed.method != "unsupported")

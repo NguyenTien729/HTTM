@@ -452,7 +452,7 @@ async def collect(run, progress=None):
             "note": "Snapshot có thể là mẫu giới hạn; cần đối chiếu phạm vi và biến trước khi phân tích."}
 
 
-def prepare_data(run_id, brief, design, collection, max_rows):
+def prepare_data(run_id, brief, design, collection, max_rows, drop_optional_predictors=False):
     """Execute only declared transformations; never execute LLM-generated code."""
     brief = ResearchBrief.model_validate(brief)
     design = AnalysisDesign.model_validate(design)
@@ -560,7 +560,9 @@ def prepare_data(run_id, brief, design, collection, max_rows):
         raise ValueError("Có nguồn được chọn nhưng chưa khai báo cách kết hợp.")
     if len(frame) > max_rows:
         raise ValueError("Dữ liệu sau kết hợp vượt giới hạn dòng đã cấu hình.")
-    required = {n.key for n in brief.data_needs if n.required}
+    # Join keys only matter when sources are joined: a single source needs none.
+    required = {n.key for n in brief.data_needs if n.required
+                and not (n.role == "join_key" and len(design.sources) == 1)}
     if required - set(frame):
         raise ValueError("Thiếu biến bắt buộc: " + ", ".join(sorted(required-set(frame))))
     year_need = next((n for n in brief.data_needs if n.role == "join_key" and n.key == "year"), None)
@@ -582,25 +584,37 @@ def prepare_data(run_id, brief, design, collection, max_rows):
         raise ValueError("Hiện chỉ hỗ trợ biến kết quả dạng số.")
     if len(set(design.predictors)) != len(design.predictors):
         raise ValueError("Biến giải thích bị lặp.")
+    predictors, dropped = [], []
     for predictor in design.predictors:
-        if predictor not in frame or predictor == design.target or needs[predictor].role == "join_key":
-            raise ValueError("Biến giải thích không hợp lệ.")
-        if not pd.api.types.is_numeric_dtype(frame[predictor]):
-            raise ValueError("Biến giải thích phải là cột số.")
-    if design.method in ("ols", "correlation") and not design.predictors:
-        raise ValueError("Phương pháp cần có biến giải thích.")
-    subset = [design.target] + design.predictors
+        problem = None
+        if predictor not in frame or predictor == design.target or predictor not in needs \
+                or needs[predictor].role == "join_key":
+            problem = f"Biến giải thích '{predictor}' không hợp lệ hoặc chưa được ánh xạ tới cột."
+        elif not pd.api.types.is_numeric_dtype(frame[predictor]):
+            problem = f"Biến giải thích '{predictor}' phải là cột số."
+        if problem:
+            # An optional covariate (control / secondary exposure) that is text or
+            # unmapped is removed and reported, instead of blocking the design.
+            if drop_optional_predictors and predictor in needs and not needs[predictor].required:
+                dropped.append({"variable": predictor, "reason": problem})
+                continue
+            raise ValueError(problem)
+        predictors.append(predictor)
+    if design.method in ("ols", "correlation") and not predictors:
+        raise ValueError("Phương pháp cần có biến giải thích dạng số.")
+    subset = [design.target] + predictors
     complete = frame[subset].replace([float("inf"), -float("inf")], float("nan")).dropna()
-    if len(complete) < max(3, len(design.predictors)+3 if design.method == "ols" else 3):
+    if len(complete) < max(3, len(predictors)+3 if design.method == "ols" else 3):
         raise ValueError("Không đủ bản ghi hợp lệ cho phương pháp đề xuất.")
     if design.method in ("ols", "correlation") and any(complete[c].nunique() < 2 for c in subset):
         raise ValueError("Biến phân tích không có biến thiên.")
     if design.method == "ols":
         import numpy as np
-        matrix = np.column_stack([np.ones(len(complete)), complete[design.predictors].to_numpy(dtype=float)])
+        matrix = np.column_stack([np.ones(len(complete)), complete[predictors].to_numpy(dtype=float)])
         if np.linalg.matrix_rank(matrix) < matrix.shape[1]:
             raise ValueError("Các biến giải thích phụ thuộc tuyến tính; cần điều chỉnh mô hình.")
     return frame, {"ok": True, "rows": len(frame), "complete_analysis_rows": len(complete),
+                   "predictors": predictors, "dropped_predictors": dropped,
                    "columns": list(frame), "joins": joins, "provenance": provenance,
                    "warnings": ["Chỉ phân tích liên hệ quan sát; chưa có thiết kế nhận diện tác động nhân quả."]}
 

@@ -135,7 +135,10 @@ def decide(run, request):
         keep = {"settings", "topic", "literature_search", "literature_read", "literature_synthesis", "approvals",
                 "user_sources", "data_preferences"}
         if restart != "research_plan":
-            keep |= {"research_plan"}
+            keep |= {"research_plan", "data_feasibility"}
+        elif request.keep_sources and status == "awaiting_design_approval":
+            # A data-grounded alternative question reuses the sources it was built from.
+            keep.add("data_collection")
         if restart == "data_collection":
             keep.add("data_collection")
         if search_guidance is not None:

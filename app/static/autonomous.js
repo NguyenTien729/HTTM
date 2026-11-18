@@ -214,5 +214,50 @@ render=function(run){
   const decisionCard=$('decision-notes')?.closest('.card');
   if(decisionCard&&decisionCard.parentNode===$('workspace'))$('workspace').insertBefore(c,decisionCard);else $('workspace').append(c);
 };
+/* Data feasibility at the research gate, and data-grounded alternative questions at the design gate. */
+function cardByTitle(title){return [...$('workspace').children].find(c=>c.querySelector(':scope > h2')?.textContent===title);}
+function placeBefore(c,ref){if(ref&&ref.parentNode===$('workspace'))$('workspace').insertBefore(c,ref);else $('workspace').append(c);}
+const verdicts={likely:['Các biến bắt buộc đều đã có nguồn ứng viên.',''],
+  team_data:['Một số biến chưa có nguồn công khai, nhưng nhóm đã tải dữ liệu lên; bước thiết kế sẽ đối chiếu với file của nhóm.','warning'],
+  at_risk:['Chưa thấy nguồn cho một số biến bắt buộc. Nếu duyệt ngay, nhiều khả năng bước thiết kế sẽ dừng vì thiếu dữ liệu.','warning'],
+  unknown:['Chưa kiểm tra được khả năng có dữ liệu.','warning']};
+const renderWithFeasibility=render;
+render=function(run){
+  renderWithFeasibility(run);
+  const a=run.artifacts,f=a.data_feasibility;
+  if(a.settings?.paper_type==='review'||!f||a.data_collection)return;
+  const c=card('Khả năng có dữ liệu');
+  const [text,cls]=verdicts[f.verdict]||verdicts.unknown;c.append(node('div',text,cls||'notice'));
+  if(f.missing_required?.length)para(c,'Chưa có ứng viên: '+f.missing_required.join('; ')+'.');
+  table(c,['Biến','Vai trò','Bắt buộc','Số ứng viên','Ví dụ nguồn'],(f.needs||[]).map(n=>[n.concept+' ('+n.unit+', '+n.resolution+')',n.role,n.required?'Có':'Không',
+    n.searched?n.candidate_count:'Hết thời gian',n.candidates.slice(0,2).map(x=>x.title+' — '+(x.source||'')).join('; ')||'—']));
+  para(c,f.note||'');
+  if(run.status==='awaiting_research_approval'){
+    c.append(node('h3','Nên làm gì'));
+    if(f.verdict==='at_risk')para(c,'• Tải dữ liệu của nhóm ở thẻ bên dưới, hoặc ghi yêu cầu điều chỉnh để đổi biến/địa bàn/đơn vị phân tích sang loại có dữ liệu (ví dụ chỉ số quốc gia × năm của World Bank).');
+    const users=a.user_sources||[];
+    if(users.length){const row=node('div',null,'actions');button(row,'Lập lại câu hỏi theo dữ liệu nhóm đã tải',()=>act('decision',{action:'revise',restart_from:'research_plan',
+      notes:'Lập lại câu hỏi nghiên cứu và yêu cầu dữ liệu sao cho đo được bằng dữ liệu nhóm đã tải lên ('+users.map(s=>s.source_key+': '+s.candidate.title).join(', ')+'), giữ nguyên lĩnh vực của đề tài.'}),'primary');c.append(row);}
+  }
+  details(c,'Chi tiết tìm kiếm',f);
+  const plan=cardByTitle('Câu hỏi & kế hoạch dữ liệu');placeBefore(c,plan?.nextSibling);
+};
+const renderWithAlternatives=render;
+render=function(run){
+  renderWithAlternatives(run);
+  const a=run.artifacts,alt=a.alternative_questions;
+  if(a.settings?.paper_type==='review'||!alt||run.status!=='awaiting_design_approval')return;
+  const c=card('Câu hỏi thay thế theo dữ liệu có sẵn');
+  if(!alt.alternatives?.length){para(c,alt.error?'Chưa đề xuất được câu hỏi thay thế ('+alt.error+').':'Dữ liệu đã tải không trả lời được câu hỏi nào gần với đề tài. Hãy tải dữ liệu của nhóm hoặc tìm lại nguồn.','warning');}
+  else{para(c,alt.note);
+    alt.alternatives.forEach((q,i)=>{const box=node('div',null,'source');box.append(node('h3',(i+1)+'. '+q.question));para(box,q.rationale);
+      table(box,['Vai trò','Khái niệm','Nguồn : cột'],[['Biến kết quả',q.outcome.concept,q.outcome.source_key+' : '+q.outcome.column],...q.exposures.map(e=>['Biến giải thích',e.concept,e.source_key+' : '+e.column])]);
+      if(q.join_columns?.length)para(box,'Ghép theo: '+q.join_columns.join(', '));
+      box.append(node('div','Khác câu hỏi gốc: '+q.scope_change,'warning'));
+      const row=node('div',null,'actions');button(row,'Dùng câu hỏi này',()=>act('decision',{action:'revise',restart_from:'research_plan',keep_sources:true,
+        notes:'Đổi câu hỏi nghiên cứu thành: '+q.question+' Biến kết quả: '+q.outcome.concept+' (nguồn '+q.outcome.source_key+', cột '+q.outcome.column+'). Biến giải thích: '+q.exposures.map(e=>e.concept+' ('+e.source_key+', cột '+e.column+')').join('; ')+(q.join_columns?.length?'. Ghép theo: '+q.join_columns.join(', '):'')+'. Thay đổi phạm vi đã được người dùng chấp nhận: '+q.scope_change}),'primary');box.append(row);c.append(box);});}
+  if(alt.rejected?.length)details(c,'Đề xuất bị loại vì không khớp dữ liệu thật',alt.rejected);
+  placeBefore(c,$('decision-notes')?.closest('.card'));
+};
 loadHistory();
 const initial=new URLSearchParams(location.search).get('run')||localStorage.getItem('httmAutonomousRun');if(initial&&/^\d+$/.test(initial))openRun(initial);

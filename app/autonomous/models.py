@@ -128,6 +128,8 @@ class Decision(StrictModel):
     action: Literal["approve", "revise"]
     notes: str = Field(default="", max_length=4000)
     restart_from: Literal["research_plan", "data_collection", "design", "introduction", "manuscript", "verification"] | None = None
+    # Re-plan the question but keep the already downloaded sources (data-grounded alternatives).
+    keep_sources: bool = False
 
 
 class VersionRequest(StrictModel):
@@ -194,3 +196,22 @@ class ProposalDraft(StrictModel):
 class ProposalRevision(StrictModel):
     expected_version: int = Field(ge=1)
     instruction: str = Field(min_length=3, max_length=4000)
+
+
+class ColumnRef(StrictModel):
+    source_key: str
+    column: str
+    concept: str
+
+
+class AlternativeQuestion(StrictModel):
+    question: str = Field(min_length=10)
+    rationale: str
+    outcome: ColumnRef
+    exposures: list[ColumnRef] = Field(min_length=1, max_length=4)
+    join_columns: list[str] = Field(default_factory=list, max_length=4)
+    scope_change: str
+
+
+class AlternativeQuestions(StrictModel):
+    alternatives: list[AlternativeQuestion] = Field(default_factory=list, max_length=3)

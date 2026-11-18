@@ -10,7 +10,7 @@ from app.services.llm import generate_structured
 from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 from . import data
 from .models import (ResearchBrief, AnalysisDesign, FrontMatter, ScientificAudit,
-                     PaperStory, ProposalDraft, ClaimEvidenceMap)
+                     PaperStory, ProposalDraft, ClaimEvidenceMap, AlternativeQuestions)
 from .state import fingerprint
 
 
@@ -103,10 +103,28 @@ async def create_proposal_draft(run, blockers, coverage):
     return draft
 
 
+def available_data_context(artifacts):
+    """Schema of team uploads and sources kept from a previous collection, for planning."""
+    sources = list(artifacts.get("user_sources", []))
+    known = {s.get("source_key") for s in sources}
+    sources += [s for s in (artifacts.get("data_collection") or {}).get("sources", []) if s.get("source_key") not in known]
+    return [{"source_key": s.get("source_key"), "title": s.get("candidate", {}).get("title"),
+             "origin": "team_upload" if s.get("candidate", {}).get("user_provided") else s.get("candidate", {}).get("source"),
+             "description": str(s.get("candidate", {}).get("description", ""))[:800], "rows": s.get("rows"),
+             "columns": [{"name": c.get("name"), "dtype": c.get("dtype")} for c in s.get("columns", [])[:60]],
+             "sample": (s.get("sample") or [])[:3]} for s in sources]
+
+
 async def research_plan(run):
     corpus = await evidence(run["project_id"])
     if not corpus:
         raise ValueError("Chưa có tài liệu đã đọc làm bằng chứng; không thể tự bịa khoảng trống.")
+    available = available_data_context(run["artifacts"])
+    data_rule = ("Dữ liệu đã có sẵn cho tiến trình này (file nhóm tải lên hoặc nguồn đã kiểm tra) được liệt kê dưới đây. "
+                 "Nếu phù hợp với đề tài, đặt câu hỏi và data_needs sao cho đo được bằng các cột có thật này: "
+                 "search_terms và unit mô tả đúng cột, không đổi đề tài và không bịa cột. "
+                 "Nếu dữ liệu không phù hợp đề tài thì bỏ qua và nêu rõ trong feasibility_notes.\n"
+                 + json.dumps(available, ensure_ascii=False, default=str) + "\n") if available else ""
     brief = await generate_structured(
         VIETNAMESE_WRITING_RULE + "Lập hồ sơ nghiên cứu định lượng bằng dữ liệu thứ cấp. "
         "Đề tài bất biến: " + run["artifacts"]["topic"] + "\n"
@@ -126,11 +144,72 @@ async def research_plan(run):
         "evidence_paper_ids chỉ lấy ID trong bằng chứng bên dưới. Nếu cần dữ liệu bảng/chuỗi thời gian, nêu rõ "
         "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả.\n"
         + "Yêu cầu bổ sung của người dùng: " + run["artifacts"].get("feedback", "") + "\n"
+        + data_rule
         + json.dumps(corpus, ensure_ascii=False, default=str), ResearchBrief)
     valid = {p["id"] for p in corpus}
     if not set(brief.evidence_paper_ids).issubset(valid):
         raise ValueError("Kế hoạch dẫn tài liệu không thuộc bằng chứng đã đọc.")
+    # Tell the user, before approval, whether each variable has any candidate source.
+    try:
+        run["artifacts"]["data_feasibility"] = await data.probe_feasibility(
+            brief, run["artifacts"].get("user_sources", []),
+            seconds=float(run["artifacts"].get("settings", {}).get("feasibility_seconds", 75)))
+    except Exception as exc:  # The probe is advisory; never block planning on it.
+        run["artifacts"]["data_feasibility"] = {"schema_version": "httm/data-feasibility-v1", "verdict": "unknown",
+                                                "needs": [], "errors": [{"error": type(exc).__name__}]}
     return brief.model_dump()
+
+
+def _numeric(dtype):
+    return str(dtype).lower().startswith(("int", "uint", "float", "double"))
+
+
+def validate_alternatives(proposal, collection):
+    """Keep only alternatives whose every column exists, is numeric and is joinable."""
+    columns = {s["source_key"]: {c["name"]: c.get("dtype") for c in s.get("columns", [])}
+               for s in collection.get("sources", [])}
+    valid, rejected = [], []
+    for item in proposal.alternatives:
+        refs = [item.outcome, *item.exposures]
+        used = sorted({ref.source_key for ref in refs})
+        problem = None
+        for ref in refs:
+            if ref.source_key not in columns or ref.column not in columns[ref.source_key]:
+                problem = f"Cột {ref.source_key}:{ref.column} không có trong snapshot."
+            elif not _numeric(columns[ref.source_key][ref.column]):
+                problem = f"Cột {ref.source_key}:{ref.column} không phải biến số."
+            if problem:
+                break
+        if not problem and len(used) > 2:
+            problem = "Dùng quá hai nguồn."
+        if not problem and len(used) == 2 and (not item.join_columns or any(
+                col not in columns[key] for key in used for col in item.join_columns)):
+            problem = "Hai nguồn không có cột khóa ghép chung đã khai báo."
+        if problem:
+            rejected.append({"question": item.question, "reason": problem})
+        else:
+            valid.append(item.model_dump() | {"source_keys": used})
+    return valid, rejected
+
+
+async def suggest_alternatives(run, brief, collection, blockers):
+    """Data-grounded questions on the same topic, when the approved one has no usable data."""
+    papers = [p for p in await evidence(run["project_id"]) if p["id"] in set(brief.evidence_paper_ids)]
+    proposal = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Câu hỏi nghiên cứu đã duyệt chưa có dữ liệu phù hợp. Đề xuất tối đa 3 câu hỏi THAY THẾ cùng lĩnh vực với đề tài, "
+        "mỗi câu trả lời được bằng các snapshot dữ liệu THỰC TẾ bên dưới ở mức liên hệ quan sát (mô tả, tương quan, OLS). "
+        "outcome và exposures phải trỏ đúng source_key và tên cột có thật, là cột số đo đúng khái niệm; không dùng cột mã/ID. "
+        "Nếu dùng hai nguồn thì join_columns phải là các cột có trong cả hai nguồn. "
+        "scope_change nói thẳng điểm khác so với câu hỏi gốc (biến, địa bàn, đơn vị phân tích, thời gian). "
+        "Không đề xuất câu hỏi nhân quả, không bịa cột hay nguồn. Nếu không có câu hỏi hợp lý, trả danh sách rỗng.\n"
+        + json.dumps({"topic": run["artifacts"]["topic"], "approved_question": brief.question,
+                      "blockers": blockers, "literature": [{k: p.get(k) for k in ("id", "title", "key_finding")} for p in papers][:20]},
+                     ensure_ascii=False, default=str) + "\n" + data.design_context(collection), AlternativeQuestions)
+    valid, rejected = validate_alternatives(proposal, collection)
+    return {"alternatives": valid, "rejected": rejected,
+            "note": "Câu hỏi thay thế dựa trên cột có thật trong dữ liệu đã tải; chọn một câu sẽ lập lại kế hoạch "
+                    "và giữ nguyên các nguồn đã tải. Thiết kế và phân tích vẫn được kiểm tra lại đầy đủ."}
 
 
 async def design(run):
@@ -236,7 +315,15 @@ async def design(run):
             await create_proposal_draft(run, result["missing_requirements"], list(coverage.values()))
         except Exception as exc:
             run["artifacts"]["proposal_draft_error"] = type(exc).__name__
+        if collection.get("sources"):
+            try:
+                run["artifacts"]["alternative_questions"] = await suggest_alternatives(
+                    run, brief, collection, result["missing_requirements"])
+            except Exception as exc:
+                run["artifacts"]["alternative_questions"] = {"alternatives": [], "rejected": [],
+                                                            "error": type(exc).__name__}
     else:
+        run["artifacts"].pop("alternative_questions", None)
         validation["coverage"] = list(coverage.values())
         result = candidate
     run["artifacts"]["design_validation"] = validation

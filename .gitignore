@@ -10,3 +10,4 @@ artifacts/.review-test-db.log
 artifacts/autonomous/
 artifacts/.autonomous-browser-profile/
 artifacts/autonomous-preview/
+artifacts/worldbank-cache/

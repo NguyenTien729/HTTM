@@ -12,6 +12,7 @@ from app.data_research.service import (
     DataResearchError, _explicit_geography_conflict, _json_safe, discover_gap_datasets,
     download_dataset_dataframe, inspect_dataset,
 )
+from app.data_research import worldbank
 from .models import AnalysisDesign, ResearchBrief
 
 ROOT = Path(__file__).resolve().parents[2] / "artifacts" / "autonomous"
@@ -63,6 +64,100 @@ async def _refine_missing_queries(brief, guidance, timeout):
         if not queries.get(need.key):
             queries[need.key] = fallback_queries(need)
     return queries
+
+
+def need_search_context(need, brief, refinement=(), excluded_ids=()):
+    """Discovery context for one variable (shared by collection and the feasibility probe)."""
+    join_context = " ".join(dict.fromkeys(
+        [term for item in brief.data_needs if item.role == "join_key"
+         for term in [item.concept, *item.search_terms]]))
+    variable_terms = list(dict.fromkeys([need.concept] + need.search_terms))
+    context = {"project_topic": " ".join([need.concept, brief.geography, brief.time_scope]),
+               "description": " ".join([need.concept, need.unit, need.resolution]),
+               "_search_concept_groups": [variable_terms],
+               "_data_queries": list(dict.fromkeys([
+                   " ".join([need.concept, brief.geography, brief.time_scope, join_context]),
+                   *need.search_terms, need.concept, need.unit + " " + need.resolution,
+                   *refinement])),
+               "proposed_research_question": brief.question}
+    if excluded_ids:
+        context["_exclude_dataset_ids"] = list(excluded_ids)
+    if brief.geography_terms:
+        context["_search_scope_terms"] = brief.geography_terms
+    return context
+
+
+async def probe_feasibility(brief, user_sources=(), seconds=75.0):
+    """Quick metadata-only search per variable, shown at the research-approval gate.
+
+    It answers "is there any candidate source for each variable?" before the user
+    approves the question. Candidates are not downloaded or validated here; the
+    collection and design stages still check real columns, scope and units.
+    """
+    brief = ResearchBrief.model_validate(brief) if isinstance(brief, dict) else brief
+    needs = [need for need in brief.data_needs if need.role != "join_key"]
+    loop = asyncio.get_running_loop()
+    started, errors = loop.time(), []
+    per_need = max(8.0, min(25.0, seconds * 2 / max(1, len(needs))))
+    slots = asyncio.Semaphore(2)
+
+    async def one(need):
+        async with slots:
+            stable = await worldbank_candidates(need, brief, [], errors)
+            try:
+                hub = await asyncio.wait_for(discover_gap_datasets(
+                    need_search_context(need, brief), limit=3, max_search_seconds=per_need), timeout=per_need + 2)
+            except (DataResearchError, asyncio.TimeoutError) as exc:
+                errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
+                hub = {"datasets": []}
+            found = []
+            for candidate in [*stable, *hub.get("datasets", [])]:
+                if candidate.get("dataset_id") in {c["dataset_id"] for c in found}:
+                    continue
+                found.append({key: candidate.get(key) for key in (
+                    "dataset_id", "title", "source", "dataset_url", "scope_match", "relevance_note")})
+            return need, found
+
+    tasks = [asyncio.create_task(one(need)) for need in needs]
+    done, pending = await asyncio.wait(tasks, timeout=max(1.0, seconds)) if tasks else (set(), set())
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    results = {need.key: found for need, found in (task.result() for task in done if not task.exception())}
+    rows = [{"key": need.key, "concept": need.concept, "role": need.role, "unit": need.unit,
+             "resolution": need.resolution, "required": need.required,
+             "searched": need.key in results, "candidates": results.get(need.key, [])[:6],
+             "candidate_count": len(results.get(need.key, []))} for need in needs]
+    required = [row for row in rows if row["required"]]
+    missing = [row["concept"] for row in required if not row["candidate_count"]]
+    verdict = "likely" if not missing else "team_data" if user_sources else "at_risk"
+    return {"schema_version": "httm/data-feasibility-v1", "verdict": verdict, "needs": rows,
+            "required_total": len(required), "required_with_candidates": len(required) - len(missing),
+            "missing_required": missing, "user_sources": len(list(user_sources)),
+            "errors": errors[:20], "time_limit_reached": bool(pending),
+            "elapsed_seconds": round(loop.time() - started, 1),
+            "note": "Ứng viên chỉ dựa trên metadata và chưa được tải về; cột, địa bàn, thời gian và đơn vị "
+                    "sẽ được kiểm tra thật ở bước thu thập và thiết kế. Không tìm thấy ứng viên không chứng minh "
+                    "rằng dữ liệu không tồn tại."}
+
+
+def need_phrases(need, refinement=()):
+    """English search phrases for one variable, most specific first."""
+    return list(dict.fromkeys(p.strip() for p in [*need.search_terms, need.concept, *refinement] if p and p.strip()))
+
+
+async def worldbank_candidates(need, brief, refinement, errors, excluded_ids=()):
+    """World Bank indicators for one variable; failures are logged, never fatal."""
+    if need.role == "join_key":
+        return []
+    try:
+        found = await asyncio.wait_for(worldbank.search_indicators(
+            need_phrases(need, refinement), brief.geography, limit=3), timeout=40)
+    except (worldbank.WorldBankError, asyncio.TimeoutError) as exc:
+        errors.append({"requirement": need.key, "source": "World Bank",
+                       "error": str(exc) or "World Bank timeout"})
+        return []
+    return [candidate for candidate in found if candidate["dataset_id"] not in set(excluded_ids)]
 
 
 def snapshot_path(run_id, revision, source_key):
@@ -182,36 +277,26 @@ async def collect(run, progress=None):
     # The public dataset indexes rate-limit bursts; keep discovery parallelism
     # modest so broader query plans do not turn into a provider-wide 429 wave.
     search_slots = asyncio.Semaphore(2)
-    join_context = " ".join(dict.fromkeys(
-        [term for need in brief.data_needs if need.role == "join_key"
-         for term in [need.concept, *need.search_terms]]))
     async def search(need, refinement=None, search_seconds=24, wave="initial"):
         async with search_slots:
             refinement = refinement or []
             # Screen each dataset for the variable currently being sought. A
             # climate source must not be rejected merely because it lacks the
             # separate agricultural outcome that will be joined later.
-            variable_terms = list(dict.fromkeys([need.concept] + need.search_terms))
-            context = {"project_topic": " ".join([need.concept, brief.geography, brief.time_scope]),
-                       "description": " ".join([need.concept, need.unit, need.resolution]),
-                       "_search_concept_groups": [variable_terms],
-                       "_data_queries": list(dict.fromkeys([
-                           " ".join([need.concept, brief.geography, brief.time_scope, join_context]),
-                           *need.search_terms, need.concept, need.unit + " " + need.resolution,
-                           *refinement])),
-                       "proposed_research_question": brief.question}
-            if excluded_ids:
-                context["_exclude_dataset_ids"] = excluded_ids
-            if brief.geography_terms:
-                context["_search_scope_terms"] = brief.geography_terms
+            context = need_search_context(need, brief, refinement, excluded_ids)
             try:
-                result = await asyncio.wait_for(discover_gap_datasets(
-                    context, limit=5 if wave == "supplemental" else 4,
-                    max_search_seconds=search_seconds), timeout=search_seconds + 2)
+                try:
+                    result = await asyncio.wait_for(discover_gap_datasets(
+                        context, limit=5 if wave == "supplemental" else 4,
+                        max_search_seconds=search_seconds), timeout=search_seconds + 2)
+                except (DataResearchError, asyncio.TimeoutError) as exc:
+                    errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
+                    result = {"search": {}, "datasets": []}
+                # World Bank: a stable country × year source searched for every variable.
+                stable = await worldbank_candidates(need, brief, refinement, errors, excluded_ids)
+                result = dict(result, datasets=list(result.get("datasets", [])) + stable)
+                result["search"] = dict(result.get("search") or {}, world_bank_candidates=len(stable))
                 return need, result
-            except (DataResearchError, asyncio.TimeoutError) as exc:
-                errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
-                return need, {"search": {}, "datasets": []}
             finally:
                 counters["searches_done"] += 1
                 await report("search", ("Lượt bổ sung: " if wave == "supplemental" else "Tìm theo biến: ") + need.concept)
@@ -306,6 +391,9 @@ async def collect(run, progress=None):
             await report("download", "Đang kiểm tra và tải: " + dataset_id)
             try:
                 async def read():
+                    if dataset_id.startswith(worldbank.DATASET_PREFIX):
+                        frame, meta = await worldbank.download_indicator(dataset_id, brief.time_scope, settings["max_rows"])
+                        return frame, meta, {"config": meta["config"], "split": meta["split"]}
                     if dataset_id.startswith("mendeley:"):
                         # Mendeley inspect already downloads the whole file. Read once.
                         frame, meta = await download_dataset_dataframe(dataset_id, None, "0", settings["max_rows"])
@@ -335,7 +423,7 @@ async def collect(run, progress=None):
                 counters["sources_saved"] += 1
             except Exception as exc:
                 errors.append({"dataset_id": dataset_id, "error": str(exc)
-                    if isinstance(exc, (DataResearchError, ValueError)) else type(exc).__name__})
+                    if isinstance(exc, (DataResearchError, ValueError, worldbank.WorldBankError)) else type(exc).__name__})
             finally:
                 counters["sources_done"] += 1
                 await report("download", "Đã kiểm tra: " + dataset_id)

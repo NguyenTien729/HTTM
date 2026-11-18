@@ -165,7 +165,8 @@ async def remove_source(run_id: int, source_key: str, request: VersionRequest):
 async def stages():
     return {"stages": STAGES, "approval_gates": ["research_plan", "design", "verification"],
             "supported_methods": ["descriptive", "correlation", "ols"],
-            "sources": ["Hugging Face", "Mendeley Data / DataCite", "Dữ liệu người dùng tải lên (CSV/TSV/XLSX/Parquet)"],
+            "sources": ["World Bank Open Data (WDI)", "Hugging Face", "Mendeley Data / DataCite",
+                        "Dữ liệu người dùng tải lên (CSV/TSV/XLSX/Parquet)"],
             "upload_limits": {"max_bytes": uploads.MAX_UPLOAD_BYTES, "max_rows": uploads.MAX_UPLOAD_ROWS,
                               "max_files": uploads.MAX_USER_SOURCES, "formats": list(uploads.SUPPORTED_EXTENSIONS)}}
 

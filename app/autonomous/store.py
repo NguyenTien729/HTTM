@@ -110,6 +110,21 @@ async def change(run_id, request, action="decision"):
             return await _write(conn, run, request.expected_version)
 
 
+async def mutate(run_id, expected_version, change_fn):
+    """Apply a pure ``run -> run`` change under the row lock with an optimistic version check."""
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT * FROM autonomous_runs WHERE id=$1 FOR UPDATE", run_id)
+            if not row:
+                raise HTTPException(404, "Không tìm thấy tiến trình.")
+            run = decode(row)
+            check_version(run, expected_version)
+            saved = await _write(conn, change_fn(run), expected_version)
+            if not saved:
+                raise HTTPException(409, "Tiến trình đã thay đổi. Tải lại rồi thử lại.")
+            return saved
+
+
 async def save_proposal_revision(run_id, expected_version, draft, instruction):
     """Persist a user-requested proposal continuation with optimistic versioning."""
     async with get_pool().acquire() as conn:

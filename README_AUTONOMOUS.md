@@ -56,6 +56,47 @@ hỏi vô hiệu hóa toàn bộ dữ liệu, thiết kế, phân tích và bả
 phương pháp vô hiệu hóa kết quả và bài viết; sửa văn bản giữ lại phân tích đã duyệt.
 Các phiên bản trước vẫn được lưu trong hồ sơ kiểm toán.
 
+## Nhận dữ liệu của nhóm nghiên cứu (tìm **hoặc nhận** dữ liệu)
+
+Ngoài việc tự tìm dữ liệu công khai, nhánh thực nghiệm nhận file do nhóm tự có
+(khảo sát, số liệu xin từ đối tác, bảng tải từ cổng thống kê…). Thẻ **Dữ liệu của nhóm
+nghiên cứu** xuất hiện trong giao diện khi tiến trình đang chờ duyệt câu hỏi, chờ duyệt
+thiết kế, bị lỗi hoặc bị gián đoạn.
+
+- Định dạng: CSV, TSV, XLSX (chọn trang tính, dòng tiêu đề), Parquet; tối đa 20 MB,
+  50.000 dòng (và không vượt giới hạn dòng của tiến trình), 300 cột, 5 file mỗi tiến trình.
+- Bắt buộc mô tả nguồn gốc, cách thu thập, địa bàn, thời gian, đơn vị; giấy phép tùy chọn.
+- Tải ở bước duyệt câu hỏi: file được dùng ở bước thu thập. Có thể chọn **chỉ dùng dữ liệu
+  của nhóm** để bỏ qua tìm kiếm công khai. Tải hoặc gỡ file sau bước thu thập: hệ thống chạy
+  lại bước thiết kế để kiểm tra lại cột, đơn vị, khóa ghép trước khi cho phép phân tích.
+- File tải lên được giữ qua mọi lần "yêu cầu điều chỉnh"; snapshot Parquet có SHA-256 như
+  nguồn công khai và được kiểm tra lại ở bước kiểm chứng.
+
+Làm sạch tất định (`app/autonomous/uploads.py`), mọi bước được ghi vào nhật ký và tự đưa
+vào phần Methods:
+
+1. Đọc mã hóa UTF-8 hoặc Windows-1258, tự nhận dấu phân cách `, ; tab |`.
+2. Chuẩn hóa tên cột (khoảng trắng, Unicode NFC, cột không tên, tên trùng).
+3. Cắt khoảng trắng, chuẩn hóa NFC cho ô văn bản; ô trống và ký hiệu thiếu (`NA`, `N/A`,
+   `-`, `..`, lỗi Excel như `#N/A`) thành giá trị thiếu, có đếm theo từng cột.
+4. Bỏ dòng và cột hoàn toàn trống.
+5. Chuyển cột văn bản sang số **chỉ khi mọi giá trị** đọc được theo cùng một định dạng
+   (`1.234,5` kiểu Việt Nam hoặc `1,234.5`). Cột mơ hồ (`1.234` có thể là 1,234 hoặc 1234)
+   được giữ dạng văn bản, được cảnh báo, và thiết kế không được ép sang số; người dùng chọn
+   định dạng số khi tải lại. Cột mã có số 0 đứng đầu (`01`) được giữ dạng mã để làm khóa ghép.
+6. Đếm dòng trùng lặp hoàn toàn; chỉ loại khi người dùng chọn.
+
+Không điền giá trị thiếu, không loại ngoại lai, không đổi đơn vị ở bước này; các quyết định
+đó thuộc thiết kế phân tích đã duyệt. Hệ thống không xác minh cách thu thập, tính đại diện
+hay quyền sử dụng của dữ liệu do nhóm cung cấp; giới hạn này được ghi vào phần Limitations.
+
+```http
+POST /autonomous/runs/{id}/sources/upload        (multipart/form-data)
+  file, expected_version, description, license?, sheet?, header_row=1,
+  number_format=auto|comma_decimal|dot_decimal, drop_duplicates=false, only_user_data=false
+POST /autonomous/runs/{id}/sources/{source_key}/remove   {"expected_version": 9}
+```
+
 ## Kiến trúc và tính bền vững
 
 - `app/autonomous/models.py`: hồ sơ nghiên cứu, yêu cầu dữ liệu và thiết kế có cấu trúc.
@@ -100,7 +141,7 @@ PDF lấy nội dung từ snapshot run được duyệt, không lấy bản vi�
 
 ## Giới hạn được áp dụng
 
-- Nguồn hiện có: Hugging Face và Mendeley Data/DataCite. Chưa có connector trực tiếp cho
+- Nguồn hiện có: Hugging Face, Mendeley Data/DataCite và file do nhóm nghiên cứu tải lên. Chưa có connector trực tiếp cho
   FAOSTAT, NASA, ERA5 hoặc cổng thống kê quốc gia. Kiến trúc cho phép bổ sung connector;
   không tuyên bố đã truy cập những nguồn chưa tích hợp.
 - Tối đa 10 snapshot ứng viên; thiết kế chọn tối đa 3 nguồn. Mặc định 6 snapshot,
@@ -173,7 +214,7 @@ Hoặc gửi `project_id` thay cho `topic`. Project tổng quan (`review`) khôn
 ## Kiểm thử
 
 ```powershell
-python -m pytest tests/test_autonomous.py -q
+python -m pytest tests/test_autonomous.py tests/test_autonomous_uploads.py -q
 python -m tests.autonomous_browser_smoke
 ```
 

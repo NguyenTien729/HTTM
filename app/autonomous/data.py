@@ -111,10 +111,16 @@ async def collect(run, progress=None):
     previous_collection = run["artifacts"].get("data_collection") or {}
     target_scope = {"project_topic": " ".join([brief.geography, brief.time_scope]),
                     "_search_scope_terms": brief.geography_terms}
-    sources, rejected_previous_sources = [], []
+    # Files uploaded by the research team are always carried forward from the
+    # run's own list (the single source of truth), never re-screened by scope.
+    user_sources = [dict(source) for source in run["artifacts"].get("user_sources", [])]
+    public_search = (run["artifacts"].get("data_preferences") or {}).get("public_search", True)
+    sources, rejected_previous_sources = list(user_sources), []
     for source in previous_collection.get("sources", []):
         source = dict(source)
         candidate = source.get("candidate", {})
+        if candidate.get("user_provided"):
+            continue
         conflict = _explicit_geography_conflict(candidate, target_scope)
         if conflict:
             rejected_previous_sources.append({"dataset_id": candidate.get("dataset_id"),
@@ -122,8 +128,16 @@ async def collect(run, progress=None):
                                               "reason": conflict})
         else:
             sources.append(source)
+    if user_sources and public_search is False:
+        return {"sources": sources, "searches": [], "search_coverage": [],
+                "rejected_previous_sources": [], "errors": [], "user_sources_only": True,
+                "search_guidance": {"round": 0, "targeted_need_keys": [], "supplemental_queries": {},
+                                    "excluded_previous_dataset_ids": []},
+                "elapsed_seconds": 0.0, "time_budget_seconds": 0.0, "time_limit_reached": False,
+                "note": "Chỉ dùng dữ liệu do nhóm nghiên cứu cung cấp; bỏ qua tìm kiếm dữ liệu công khai theo yêu cầu."}
     previous_candidates = {source.get("candidate", {}).get("dataset_id"): source.get("candidate", {})
-                           for source in sources if source.get("candidate", {}).get("dataset_id")}
+                           for source in sources if source.get("candidate", {}).get("dataset_id")
+                           and not source.get("candidate", {}).get("user_provided")}
     candidates = {dataset_id: dict(candidate) for dataset_id, candidate in previous_candidates.items()}
     searches = list(previous_collection.get("searches", []))
     errors = list(previous_collection.get("errors", []))
@@ -286,10 +300,10 @@ async def collect(run, progress=None):
     async def fetch(candidate):
         nonlocal next_slot
         async with download_slots:
-            if len(sources) >= settings["max_sources"] or loop.time() >= deadline:
+            if len(sources) - len(user_sources) >= settings["max_sources"] or loop.time() >= deadline:
                 return
             dataset_id = candidate["dataset_id"]
-            await report("download", "?ang ki?m tra v? t?i: " + dataset_id)
+            await report("download", "Đang kiểm tra và tải: " + dataset_id)
             try:
                 async def read():
                     if dataset_id.startswith("mendeley:"):
@@ -306,7 +320,7 @@ async def collect(run, progress=None):
                 if frame.empty or metadata.get("analysis_mode") == "structure_only":
                     raise ValueError("Nguồn chưa có dữ liệu bảng để đo biến.")
                 # Reserve a stable slot before yielding to disk/Parquet work.
-                if len(sources) >= settings["max_sources"]:
+                if len(sources) - len(user_sources) >= settings["max_sources"]:
                     return
                 next_slot += 1
                 key = f"s{next_slot:02d}"
@@ -384,7 +398,12 @@ def prepare_data(run_id, brief, design, collection, max_rows):
         if raw.empty:
             raise ValueError("Không có bản ghi đáp ứng điều kiện lọc địa bàn/thời gian.")
         converted = pd.DataFrame(index=raw.index)
+        cleaning = (source.get("metadata") or {}).get("cleaning") or {}
+        ambiguous = {item.get("column") for item in cleaning.get("ambiguous_numeric_columns", [])}
         for binding in selection.bindings:
+            if binding.transform == "numeric" and binding.column in ambiguous:
+                raise ValueError(f"Cột '{binding.column}' có định dạng số mơ hồ (ví dụ 1.234 có thể là 1,234 hoặc 1234). "
+                                 "Hãy tải lại file và chọn định dạng số trước khi phân tích.")
             if binding.variable not in needs or binding.column not in raw:
                 raise ValueError("Ánh xạ biến không thuộc kế hoạch hoặc cột không tồn tại.")
             if binding.variable in converted:
@@ -421,6 +440,10 @@ def prepare_data(run_id, brief, design, collection, max_rows):
             "snapshot_sha256": source["sha256"], "rows": len(raw), "rows_before_filter": original_rows,
             "filters": [rule.model_dump() for rule in selection.filters],
             "sampled": source["metadata"].get("sampled", False),
+            "origin": source["metadata"].get("origin", "public_repository"),
+            "filename": source["metadata"].get("filename"),
+            "raw_sha256": source["metadata"].get("raw_sha256"),
+            "cleaning_summary": source["metadata"].get("cleaning_summary"),
             "bindings": [b.model_dump() for b in selection.bindings]})
     base = design.sources[0].source_key
     frame = frames[base]
@@ -499,7 +522,12 @@ def design_context(collection):
     profiles = []
     for source in collection["sources"]:
         candidate = source["candidate"]
-        profiles.append({"source_key": source["source_key"], "rows": source["rows"],
+        cleaning = source["metadata"].get("cleaning") or {}
+        user = {"user_provided": True, "user_description": candidate.get("description", "")[:2500],
+                "cleaning_summary": source["metadata"].get("cleaning_summary", ""),
+                "ambiguous_numeric_columns": [item.get("column") for item in cleaning.get("ambiguous_numeric_columns", [])],
+                "code_like_columns": cleaning.get("code_like_columns", [])} if candidate.get("user_provided") else {}
+        profiles.append({"source_key": source["source_key"], "rows": source["rows"], **user,
             "columns": source["columns"], "sample": source["sample"][:3],
             "sampled": source["metadata"].get("sampled", False),
             "candidate": {"dataset_id": candidate["dataset_id"], "title": candidate["title"],

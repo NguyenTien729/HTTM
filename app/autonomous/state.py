@@ -130,7 +130,10 @@ def decide(run, request):
                 "user_notes": request.notes.strip(),
                 "round": int((artifacts.get("data_search_guidance") or {}).get("round", 0)) + 1,
             }
-        keep = {"settings", "topic", "literature_search", "literature_read", "literature_synthesis", "approvals"}
+        # Files uploaded by the team are user inputs, not derived artifacts: a
+        # revision re-validates them in the design stage but never discards them.
+        keep = {"settings", "topic", "literature_search", "literature_read", "literature_synthesis", "approvals",
+                "user_sources", "data_preferences"}
         if restart != "research_plan":
             keep |= {"research_plan"}
         if restart == "data_collection":

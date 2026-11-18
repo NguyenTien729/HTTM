@@ -147,7 +147,11 @@ async def design(run):
             "Chỉ các biến outcome, join_key và phơi nhiễm chính mới chặn tính khả thi; biến kiểm soát và phơi nhiễm bổ sung là tùy chọn. "
             "Nếu thiếu biến tùy chọn, hãy đưa vào limitations và vẫn đề xuất mô hình quan sát phù hợp khi outcome và phơi nhiễm chính có dữ liệu. "
             "đúng cách đo, cùng thời gian và độ phân giải, có thể trả lời câu hỏi ở mức liên hệ quan sát. "
-            "Metadata có nhắc địa bàn chưa đủ chứng minh bản ghi thuộc địa bàn. Nếu dữ liệu giả lập, "
+            "Metadata có nhắc địa bàn chưa đủ chứng minh bản ghi thuộc địa bàn. "
+            "Nguồn có user_provided=true là file do nhóm nghiên cứu tải lên: user_description là khai báo của người dùng về "
+            "phạm vi, cách thu thập và đơn vị, cần đối chiếu với tên cột và giá trị mẫu chứ không tự coi là đã kiểm chứng. "
+            "Cột trong ambiguous_numeric_columns không được dùng transform numeric. Cột trong code_like_columns là mã, "
+            "dùng strip/casefold khi làm khóa ghép, không coi là đại lượng. Nếu dữ liệu giả lập, "
             "instruction tuning hoặc ảnh không có biến định lượng phù hợp thì adequate=false. "
             "Đọc ý nghĩa và giá trị mẫu để phân biệt mã số với đại lượng. "
             "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs. "
@@ -239,6 +243,23 @@ async def design(run):
     return result
 
 
+def source_methods_text(provenance):
+    """Describe each approved source, including user uploads and their cleaning log."""
+    text = ""
+    for source in provenance:
+        if source.get("origin") == "user_upload":
+            text += (f"Nguồn {source['source_key']} là dữ liệu do nhóm nghiên cứu cung cấp. "
+                     + (source.get("cleaning_summary") or "") + " "
+                     + f"Snapshot sau làm sạch có SHA-256 {source['snapshot_sha256'][:12]}… với "
+                     f"{source['rows_before_filter']} dòng; {source['rows']} dòng đáp ứng điều kiện chọn mẫu. ")
+        else:
+            text += (f"Nguồn {source['dataset_id']} ({source['dataset_url']}) cung cấp "
+                     f"{source['rows_before_filter']} dòng snapshot; {source['rows']} dòng đáp ứng điều kiện chọn mẫu. ")
+        for rule in source["filters"]:
+            text += rule["rationale"] + ". "
+    return text
+
+
 async def analyze(run):
     from app.data_research.service import analyze_dataframe
     approved(run, "research_plan")
@@ -259,6 +280,9 @@ async def analyze(run):
         "sampled": any(s["sampled"] for s in provenance),
         "sampling_method": "Giới hạn mẫu theo từng nguồn; xem source_provenance.",
         "source_provenance": provenance, "join_report": report["joins"], "rows_in_selected_split": len(frame)}
+    origins = {source.get("origin", "public_repository") for source in provenance}
+    if "user_upload" in origins:
+        metadata["data_origin"] = "user_upload" if origins == {"user_upload"} else "mixed"
     result = await asyncio.to_thread(analyze_dataframe, frame, metadata,
         target_column=spec.target, predictor_columns=spec.predictors if spec.method == "ols" else [],
         column_roles=roles, correlation_columns=[spec.target]+spec.predictors if spec.method in ("ols", "correlation") else [])
@@ -269,17 +293,18 @@ async def analyze(run):
     import importlib.metadata
     import hashlib
     from pathlib import Path
-    code = [Path(__file__), Path(data.__file__), Path(__file__).parents[1] / "data_research" / "service.py"]
+    code = [Path(__file__), Path(data.__file__), Path(__file__).parent / "uploads.py",
+            Path(__file__).parents[1] / "data_research" / "service.py"]
     result["reproducibility"] = {"python": platform.python_version(),
         "packages": {name: importlib.metadata.version(name) for name in ("pandas", "numpy", "scipy", "pyarrow")},
         "code_sha256": {str(p.relative_to(Path(__file__).parents[1])): hashlib.sha256(p.read_bytes()).hexdigest() for p in code},
         "research_plan_sha256": fingerprint(a["research_plan"]), "design_sha256": fingerprint(a["design"])}
     result["methods_draft"] += " Phương án chuẩn hóa và kết hợp nguồn đã được người dùng duyệt. "
-    for source in provenance:
-        result["methods_draft"] += (f"Nguồn {source['dataset_id']} ({source['dataset_url']}) cung cấp "
-            f"{source['rows_before_filter']} dòng snapshot; {source['rows']} dòng đáp ứng điều kiện chọn mẫu. ")
-        for rule in source["filters"]:
-            result["methods_draft"] += rule["rationale"] + ". "
+    result["methods_draft"] += source_methods_text(provenance)
+    if any(source.get("origin") == "user_upload" for source in provenance):
+        result.setdefault("limitations", []).append(
+            "Có nguồn do nhóm nghiên cứu tự cung cấp: hệ thống chỉ kiểm tra cấu trúc, giá trị và tính toàn vẹn của file; "
+            "quy trình thu thập, tính đại diện của mẫu và quyền sử dụng dữ liệu cần được nhóm mô tả và chịu trách nhiệm.")
     for join in report["joins"]:
         result["methods_draft"] += ("Dữ liệu được ghép trái theo " + ", ".join(join["keys"]) +
             f"; {join['matched_rows']} dòng khớp và {join['unmatched_rows']} dòng không khớp. ")

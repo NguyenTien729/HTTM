@@ -1420,11 +1420,17 @@ def analyze_dataframe(
 
     research_topic = str(metadata.get("research_topic") or "").strip()
     topic_context = f"Chủ đề nghiên cứu được kế thừa từ Research Planner: {research_topic}. " if research_topic else ""
+    origin_sentence = {
+        "user_upload": f"Dữ liệu do nhóm nghiên cứu cung cấp (`{metadata.get('dataset_id', 'unknown')}`) ",
+        "mixed": (f"Dữ liệu kết hợp nguồn công khai và dữ liệu do nhóm nghiên cứu cung cấp "
+                  f"(`{metadata.get('dataset_id', 'unknown')}`; {metadata.get('source', '')}) "),
+    }.get(metadata.get("data_origin"),
+          f"Dữ liệu được lấy từ dataset công khai `{metadata.get('dataset_id', 'unknown')}` trên {metadata.get('source', 'Hugging Face')} ")
     methods_draft = (
         topic_context
-        + f"Dữ liệu được lấy từ dataset công khai `{metadata.get('dataset_id', 'unknown')}` trên {metadata.get('source', 'Hugging Face')} "
-        f"(config: `{metadata.get('config', 'unknown')}`, split: `{metadata.get('split', 'unknown')}`). "
-        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
+        + origin_sentence
+        + f"(config: `{metadata.get('config', 'unknown')}`, split: `{metadata.get('split', 'unknown')}`). "
+        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ snapshot Parquet đã duyệt (có SHA-256)' if metadata.get('data_origin') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
         f"{('Do split lớn hơn giới hạn xử lý, ' + str(metadata.get('sampling_method')) + ' được sử dụng. ') if metadata.get('sampled') else 'Toàn bộ các dòng trong split được đưa vào phân tích. '}"
         f"Các bước gồm thống kê mô tả, kiểm tra dữ liệu thiếu/trùng, phân phối tần suất của biến phân loại và tương quan trên các biến liên tục đã chọn: {', '.join(correlation_cols) or 'không chọn'}. "
         f"{('Kiểm định nhóm được thực hiện cho ' + str(group_column) + ' và ' + str(target_column) + '. ') if test_results and test_results.get('status') == 'ok' else ''}"

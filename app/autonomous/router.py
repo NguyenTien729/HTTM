@@ -1,13 +1,13 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.db import get_pool
 from app.models import ResearchPlanRequest
 from app.routers.planner import create_plan
-from . import store
+from . import store, uploads
 from .data import ROOT
 from .models import StartRun, Decision, VersionRequest, ProposalRevision, ProposalDraft
 from .state import STAGES
@@ -115,11 +115,59 @@ async def continue_proposal(run_id: int, request: ProposalRevision):
     return await store.save_proposal_revision(run_id, request.expected_version, updated, request.instruction)
 
 
+@router.post("/runs/{run_id}/sources/upload", status_code=201,
+             summary="Tải dữ liệu của nhóm (CSV/TSV/XLSX/Parquet) vào nhánh thực nghiệm")
+async def upload_source(
+        run_id: int,
+        file: UploadFile = File(..., description="CSV, TSV, XLSX hoặc Parquet; tối đa 20 MB"),
+        expected_version: int = Form(..., ge=1),
+        description: str = Form(..., min_length=10, max_length=2500,
+                                description="Nguồn gốc, cách thu thập, địa bàn, thời gian và đơn vị đo"),
+        license: str = Form("", max_length=200),
+        sheet: str = Form("", max_length=100),
+        header_row: int = Form(1, ge=1, le=50),
+        number_format: str = Form("auto", pattern="^(auto|dot_decimal|comma_decimal)$"),
+        drop_duplicates: bool = Form(False),
+        only_user_data: bool = Form(False)):
+    """Receive the team's own data, clean it deterministically and attach it as a source snapshot.
+
+    Uploading at the research-approval gate stores the file for data collection. Uploading after
+    collection (design gate, failed or interrupted run) re-queues the design stage so the new
+    source is re-validated before any analysis. The cleaning log is kept for the Methods section.
+    """
+    run = await store.get(run_id)
+    if run["version"] != expected_version:
+        raise HTTPException(409, "Tiến trình đã thay đổi. Tải lại trước khi tải dữ liệu.")
+    uploads._check_can_change(run)
+    chunks, size = [], 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > uploads.MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"File vượt giới hạn {uploads.MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+        chunks.append(chunk)
+    try:
+        frame, log = await asyncio.to_thread(
+            uploads.parse_and_clean, b"".join(chunks), file.filename or "", sheet=sheet.strip() or None,
+            header_row=header_row, number_format=number_format, drop_duplicates=drop_duplicates)
+    except uploads.UploadError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await store.mutate(run_id, expected_version, lambda current: uploads.attach_user_source(
+        current, frame, log, description=description, license=license, only_user_data=only_user_data))
+
+
+@router.post("/runs/{run_id}/sources/{source_key}/remove", summary="Gỡ một file dữ liệu do nhóm tải lên")
+async def remove_source(run_id: int, source_key: str, request: VersionRequest):
+    return await store.mutate(run_id, request.expected_version,
+                              lambda current: uploads.remove_user_source(current, source_key))
+
+
 @router.get("/stages")
 async def stages():
     return {"stages": STAGES, "approval_gates": ["research_plan", "design", "verification"],
             "supported_methods": ["descriptive", "correlation", "ols"],
-            "sources": ["Hugging Face", "Mendeley Data / DataCite"]}
+            "sources": ["Hugging Face", "Mendeley Data / DataCite", "Dữ liệu người dùng tải lên (CSV/TSV/XLSX/Parquet)"],
+            "upload_limits": {"max_bytes": uploads.MAX_UPLOAD_BYTES, "max_rows": uploads.MAX_UPLOAD_ROWS,
+                              "max_files": uploads.MAX_USER_SOURCES, "formats": list(uploads.SUPPORTED_EXTENSIONS)}}
 
 
 def markdown(run):

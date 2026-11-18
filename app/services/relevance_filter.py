@@ -7,7 +7,7 @@ phrases every abstract must contain.
 import logging
 import os
 import re
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from app.models import Paper, ResearchPlan
 from app.services.llm import generate_structured
 
@@ -19,10 +19,18 @@ class TopicConcepts(BaseModel):
     scope_rule: str = Field(description="One sentence explaining the direct relevance expected, without adding constraints")
 
 
+def _none_as_empty(value):
+    # Models sometimes return null for "no supporting excerpt". Treat it as the
+    # documented empty string, which _valid_quote rejects, so screening stays strict.
+    return "" if value is None else value
+
+
 class ConceptEvidence(BaseModel):
     concept: str
     quote: str = Field(description="Exact contiguous excerpt from candidate title or abstract; empty if unsupported")
     supported: bool
+
+    _quote = field_validator("quote", mode="before")(_none_as_empty)
 
 
 class RelevanceDecision(BaseModel):
@@ -32,6 +40,8 @@ class RelevanceDecision(BaseModel):
     relationship_quote: str = Field(description="Exact title/abstract excerpt demonstrating the relationship, empty if unsupported")
     score: int = Field(ge=0, le=100)
     reason: str
+
+    _empty = field_validator("relationship_quote", "reason", mode="before")(_none_as_empty)
 
 
 class RelevanceBatch(BaseModel):

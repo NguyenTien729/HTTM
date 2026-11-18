@@ -4,6 +4,7 @@ The screen favors recall while still requiring an exact excerpt that supports
 the paper's direct relevance. Planner concept labels are guidance, not literal
 phrases every abstract must contain.
 """
+import asyncio
 import logging
 import os
 import re
@@ -100,8 +101,10 @@ async def screen_papers(
     concepts = concepts or await extract_topic_concepts(plan)
     threshold = int(os.getenv("SEARCH_RELEVANCE_THRESHOLD", "65")) if threshold is None else threshold
     threshold = max(0, min(100, threshold))
-    accepted = []
-    for offset in range(0, len(papers), batch_size):
+    concurrency = max(1, int(os.getenv("SEARCH_SCREEN_CONCURRENCY", "4")))
+    slots = asyncio.Semaphore(concurrency)
+
+    async def screen_batch(offset):
         batch = papers[offset:offset + batch_size]
         entries = "\n\n".join(
             f"CANDIDATE_ID={offset+i}\nTITLE: {p.title}\nABSTRACT: {(p.abstract or '[missing]')[:3500]}"
@@ -123,8 +126,9 @@ async def screen_papers(
             "do not reject a directly relevant candidate for omission alone, but note the uncertainty in reason and score.\n"
             f"CENTRAL CONCEPTS: {concepts.concepts}\nRELEVANCE GUIDE: {concepts.scope_rule}\n\nCANDIDATES:\n{entries}"
         )
-        result = await generate_structured(prompt, RelevanceBatch)
-        seen = set()
+        async with slots:
+            result = await generate_structured(prompt, RelevanceBatch)
+        found, seen = [], set()
         for d in result.decisions:
             i = d.candidate_id - offset
             if d.candidate_id in seen or not 0 <= i < len(batch):
@@ -132,9 +136,32 @@ async def screen_papers(
             seen.add(d.candidate_id)
             p = batch[i]
             if _approve(d, p, concepts, threshold):
-                accepted.append((p, d.score))
+                found.append((p, d.score))
             else:
                 logger.info("REJECT id=%d score=%d title=%r reason=%s", d.candidate_id, d.score, p.title, d.reason)
         if len(seen) < len(batch):
             logger.warning("REJECT missing relevance decisions: %d", len(batch) - len(seen))
-    return accepted
+        return found
+
+    # Batches are independent LLM calls: run a few at once, keep input order.
+    results = await asyncio.gather(*(screen_batch(offset) for offset in range(0, len(papers), batch_size)))
+    return [item for batch_result in results for item in batch_result]
+
+
+_WORD = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
+
+
+def prescreen_rank(papers: list[Paper], plan: ResearchPlan, concepts: TopicConcepts) -> list[Paper]:
+    """Cheap lexical ordering so the LLM screens the most promising candidates first.
+
+    It only decides the ORDER of screening; papers not screened in this window
+    stay available for the next one and are never rejected by this score.
+    """
+    vocabulary = {w.casefold() for text in [plan.topic, *concepts.concepts, *plan.keywords]
+                  for w in _WORD.findall(text or "")}
+    def score(paper):
+        title = {w.casefold() for w in _WORD.findall(paper.title or "")}
+        abstract = {w.casefold() for w in _WORD.findall(paper.abstract or "")}
+        return (2 * len(vocabulary & title) + len(vocabulary & abstract), bool(paper.abstract),
+                paper.citation_count or 0)
+    return sorted(papers, key=score, reverse=True)

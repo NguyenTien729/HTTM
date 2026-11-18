@@ -1,6 +1,7 @@
 """Six research roles, backed by existing HTTM services and recorded artifacts."""
 import asyncio
 import json
+import re
 
 from fastapi import HTTPException
 
@@ -8,7 +9,8 @@ from app.db import get_pool
 from app.services.llm import generate_structured
 from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 from . import data
-from .models import ResearchBrief, AnalysisDesign, FrontMatter, ScientificAudit
+from .models import (ResearchBrief, AnalysisDesign, FrontMatter, ScientificAudit,
+                     PaperStory, ProposalDraft, ClaimEvidenceMap)
 from .state import fingerprint
 
 
@@ -31,6 +33,76 @@ async def evidence(project_id):
     return [dict(r) for r in rows]
 
 
+async def create_proposal_draft(run, blockers, coverage):
+    """Create an explicitly non-empirical draft while carrying every blocker forward."""
+    brief = ResearchBrief.model_validate(run["artifacts"]["research_plan"])
+    papers = await evidence(run["project_id"])
+    corpus = [paper for paper in papers if paper["id"] in set(brief.evidence_paper_ids)]
+    allowed_ids = {paper["id"] for paper in corpus}
+    story = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Create the paper story before drafting. This is a research proposal because the approved question does not yet have a verified empirical dataset. "
+        "Use only the research plan and read-paper evidence supplied. Do not claim novelty, causality, dataset availability, or findings as established. "
+        "Separate the proposed contribution from what literature currently supports. List specific claims to avoid until data/analysis exist.\n" +
+        json.dumps({"topic": run["artifacts"]["topic"], "plan": brief.model_dump(), "literature": corpus,
+                    "blockers": blockers, "coverage": coverage}, ensure_ascii=False, default=str), PaperStory)
+    package = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Write a coherent Vietnamese research-proposal draft from the approved plan and paper story. "
+        "This is NOT an empirical paper: do not include results, findings, coefficient estimates, or completed-analysis language. "
+        "The abstract and methods must state that the study is proposed and not yet run. Keep research scope unchanged. "
+        "Cite only paper IDs in the supplied corpus as [id]. Do not cite dataset candidates as evidence. "
+        "Use the sections Introduction, Related Work, Proposed Methods, Data and Feasibility, Limitations, Next Steps. "
+        "Data and Feasibility must explain the exact blockers without implying the missing data were found. "
+        "Build claim_evidence_map for factual claims: supported_literature requires valid evidence_paper_ids; "
+        "supported_data is forbidden because no analysis has run; proposed is for future plans; unsupported is for claims lacking evidence. "
+        "Never upgrade a proposed claim to a finding.\n" +
+        json.dumps({"topic": run["artifacts"]["topic"], "plan": brief.model_dump(), "paper_story": dumped(story),
+                    "literature_corpus": corpus, "blockers": blockers, "data_coverage": coverage},
+                   ensure_ascii=False, default=str), ProposalDraft)
+    draft = dumped(package)
+    draft["paper_story"] = dumped(story)
+    draft["disclaimer"] = "Bản đề xuất nghiên cứu — chưa có kết quả thực nghiệm. Không dùng như bài báo thực nghiệm hoàn chỉnh."
+    draft["blockers"] = list(dict.fromkeys(blockers))
+    valid_keys = {source.get("source_key") for source in run["artifacts"].get("data_collection", {}).get("sources", [])}
+    for claim in draft["claim_evidence_map"]["claims"]:
+        bad_ids = set(claim.get("evidence_paper_ids", [])) - allowed_ids
+        bad_keys = set(claim.get("source_keys", [])) - valid_keys
+        claim["evidence_paper_ids"] = sorted(set(claim.get("evidence_paper_ids", [])) & allowed_ids)
+        # A downloaded snapshot is not yet valid analytical evidence while this
+        # design is blocked; only completed analysis can support data claims.
+        claim["source_keys"] = []
+        if claim["status"] == "supported_data":
+            claim["status"] = "unsupported"
+            claim["rationale"] += " Chưa có phân tích được duyệt để hỗ trợ luận điểm này."
+        if bad_ids or bad_keys or (claim["status"] == "supported_literature" and not claim["evidence_paper_ids"]):
+            claim["status"] = "unsupported"
+            claim["rationale"] += " Hệ thống không xác nhận được toàn bộ nguồn bằng chứng đã khai báo."
+        if claim["status"] == "unsupported":
+            draft["blockers"].append("Có luận điểm trong claim-evidence map cần người dùng kiểm tra nguồn.")
+    from app.services.citation_checker import extract_cited_ids
+    cited = set(extract_cited_ids(draft["abstract"] + "\n" + "\n".join(draft["sections"].values())))
+    invalid = set(cited) - allowed_ids
+    if invalid:
+        pattern = re.compile(r"\[(?:" + "|".join(map(str, sorted(invalid))) + r")\]")
+        for key, value in list(draft["sections"].items()):
+            draft["sections"][key] = pattern.sub("[citation cần xác minh]", value)
+        draft["abstract"] = pattern.sub("[citation cần xác minh]", draft["abstract"])
+        draft["blockers"].append("Có citation trong bản đề xuất không thuộc corpus đã đọc; đã đánh dấu để xác minh.")
+    cited = set(extract_cited_ids(draft["abstract"] + "\n" + "\n".join(draft["sections"].values())))
+    cited.update(paper_id for claim in draft["claim_evidence_map"]["claims"]
+                 for paper_id in claim.get("evidence_paper_ids", []))
+    draft["references"] = [paper for paper in corpus if paper["id"] in cited]
+    run["artifacts"]["paper_story"] = draft["paper_story"]
+    run["artifacts"]["claim_evidence_map"] = draft["claim_evidence_map"]
+    run["artifacts"]["proposal_draft"] = draft
+    run["artifacts"]["paper_state"] = {
+        "schema_version": "httm/paper-state-v1", "mode": "exploratory-proposal",
+        "stage": "draft_with_blockers", "required_artifacts": ["paper_story", "claim_evidence_map", "proposal_draft"],
+        "blockers": draft["blockers"], "build": {"status": "not_run", "format": "Markdown"}}
+    return draft
+
+
 async def research_plan(run):
     corpus = await evidence(run["project_id"])
     if not corpus:
@@ -42,8 +114,14 @@ async def research_plan(run):
         "Giữ đúng địa bàn và đối tượng. Đề xuất một câu hỏi và khoảng trống thận trọng dựa trên tài liệu; "
         "không tuyên bố đã chứng minh tính mới hay đã tìm thấy dữ liệu. Giả thuyết là dự kiến, không phải kết quả. "
         "Tách data_needs theo biến kết quả, phơi nhiễm/giải thích, kiểm soát và khóa ghép. "
+        "Chọn đúng MỘT outcome chính phù hợp nhất với câu hỏi vì bộ phân tích chỉ hỗ trợ một biến đích; không tạo hai outcome thay thế cùng bắt buộc. "
+        "Nếu người dùng nêu nhiều outcome thay thế, chọn một outcome chính và ghi lựa chọn còn lại trong feasibility_notes. "
+        "Mỗi join_key phải tương ứng một cột nguyên tử có thật (ví dụ province_code và year là hai key riêng); không gộp nhiều cột thành province_year_key. "
         "Mỗi biến có đơn vị, độ phân giải không gian/thời gian, key tiếng Anh snake_case, "
         "search_terms tiếng Anh ngắn để tìm dữ liệu riêng của biến đó. Không yêu cầu tên dataset giống toàn bộ đề tài. "
+        "Phân cấp data_needs: outcome và join_key là required; exposure đầu tiên là phơi nhiễm chính và required; "
+        "exposure bổ sung là lựa chọn thay thế (required=false); control mặc định required=false. "
+        "Chỉ nâng control thành bắt buộc nếu câu hỏi người dùng nói rõ cần kiểm soát biến đó. "
         "geography_terms chỉ gồm các cách gọi tương đương của địa bàn, không đưa khu vực khác hoặc ngôn ngữ thay địa bàn. "
         "evidence_paper_ids chỉ lấy ID trong bằng chứng bên dưới. Nếu cần dữ liệu bảng/chuỗi thời gian, nêu rõ "
         "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả.\n"
@@ -58,6 +136,7 @@ async def research_plan(run):
 async def design(run):
     approved(run, "research_plan")
     collection = run["artifacts"]["data_collection"]
+    brief = ResearchBrief.model_validate(run["artifacts"]["research_plan"])
     if not collection["sources"]:
         proposed = AnalysisDesign(adequate=False, rationale="Chưa có nguồn chứa dữ liệu bảng có thể kiểm tra.",
             missing_requirements=["Cần dữ liệu đo biến theo câu hỏi và địa bàn đã duyệt."], method="unsupported")
@@ -65,6 +144,8 @@ async def design(run):
         proposed = await generate_structured(
             VIETNAMESE_WRITING_RULE + "Đề xuất thiết kế phân tích từ dữ liệu THỰC TẾ dưới đây. "
             "Không bịa tên cột, nguồn, đơn vị hay độ bao phủ. adequate=true chỉ khi đủ biến bắt buộc, đúng địa bàn, "
+            "Chỉ các biến outcome, join_key và phơi nhiễm chính mới chặn tính khả thi; biến kiểm soát và phơi nhiễm bổ sung là tùy chọn. "
+            "Nếu thiếu biến tùy chọn, hãy đưa vào limitations và vẫn đề xuất mô hình quan sát phù hợp khi outcome và phơi nhiễm chính có dữ liệu. "
             "đúng cách đo, cùng thời gian và độ phân giải, có thể trả lời câu hỏi ở mức liên hệ quan sát. "
             "Metadata có nhắc địa bàn chưa đủ chứng minh bản ghi thuộc địa bàn. Nếu dữ liệu giả lập, "
             "instruction tuning hoặc ảnh không có biến định lượng phù hợp thì adequate=false. "
@@ -81,10 +162,9 @@ async def design(run):
             "method chỉ descriptive/correlation/ols; nếu câu hỏi bắt buộc mô hình panel, time-series, spatial "
             "hoặc thiết kế nhân quả mà OLS không phù hợp, chọn unsupported và ghi missing_requirements. "
             "Không coi các giả định là đã kiểm chứng. causal_claims_allowed=false.\n"
-            + json.dumps(run["artifacts"]["research_plan"], ensure_ascii=False) + "\n"
+            + json.dumps(brief.model_dump(), ensure_ascii=False) + "\n"
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
-    brief = ResearchBrief.model_validate(run["artifacts"]["research_plan"])
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,
@@ -128,16 +208,30 @@ async def design(run):
         if not missing:
             missing = validation.get("errors") or ["Phương pháp hiện có không đáp ứng câu hỏi nghiên cứu đã duyệt."]
         safe = AnalysisDesign(adequate=False,
-            rationale="Chưa có phương án phân tích khả thi: snapshot phải được đối chiếu với từng biến bắt buộc, đơn vị và độ phân giải trước khi phân tích. Các ánh xạ thử được lưu riêng để rà soát.",
+            rationale=("Chưa thể chạy phân tích cho câu hỏi đã duyệt. Hệ thống chỉ tính biến bắt buộc là biến kết quả, khóa ghép và phơi nhiễm chính; biến kiểm soát được báo riêng để không chặn phương án. "
+                       + ("Chưa tìm thấy biến kết quả trong các snapshot đã tải. "
+                          if not any(row["role"] == "outcome" and row["sources"] for row in coverage.values()) else "")
+                       + "Các nguồn ứng viên và lỗi tìm/tải được ghi bên dưới để phân biệt thiếu dữ liệu với lỗi bộ tìm kiếm."),
             missing_requirements=list(dict.fromkeys(missing)), method="unsupported",
             limitations=proposed.limitations, assumptions=proposed.assumptions)
         validation.update({"ok": False, "coverage": list(coverage.values()),
                            "invalid_bindings": invalid_bindings,
                            "candidate_mappings": candidate.get("sources", []),
+                           "collection_diagnostics": {
+                               "source_count": len(collection.get("sources", [])),
+                               "search_errors": collection.get("errors", [])[:20],
+                               "time_limit_reached": collection.get("time_limit_reached", False),
+                               "search_coverage": collection.get("search_coverage", []),
+                               "rejected_previous_sources": collection.get("rejected_previous_sources", [])[:20],
+                           },
                            "next_actions": ["Tìm lại nguồn cho các biến còn thiếu; nguồn đã kiểm tra sẽ được loại khỏi lượt tìm lại.",
                                             "Đề xuất phương pháp phù hợp với dữ liệu hiện có.",
                                             "Điều chỉnh câu hỏi hoặc yêu cầu độ phân giải nếu bạn chấp thuận thay đổi phạm vi."]})
         result = safe.model_dump()
+        try:
+            await create_proposal_draft(run, result["missing_requirements"], list(coverage.values()))
+        except Exception as exc:
+            run["artifacts"]["proposal_draft_error"] = type(exc).__name__
     else:
         validation["coverage"] = list(coverage.values())
         result = candidate
@@ -190,6 +284,25 @@ async def analyze(run):
         result["methods_draft"] += ("Dữ liệu được ghép trái theo " + ", ".join(join["keys"]) +
             f"; {join['matched_rows']} dòng khớp và {join['unmatched_rows']} dòng không khớp. ")
     result["methods_draft"] += "Các phép phân tích chỉ đánh giá mối liên hệ quan sát, không xác định tác động nhân quả."
+    papers = await evidence(run["project_id"])
+    brief = ResearchBrief.model_validate(a["research_plan"])
+    paper_ids = set(brief.evidence_paper_ids)
+    literature = [{key: paper.get(key) for key in ("id", "title", "year", "doi", "method", "key_finding", "limitation", "abstract")}
+                  for paper in papers if paper["id"] in paper_ids][:30]
+    analysis_evidence = {key: result.get(key) for key in (
+        "methods_draft", "results_draft", "dataset", "overview", "ols_regression",
+        "correlation_pearson", "limitations", "analysis_plan") if result.get(key) is not None}
+    story = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Define the paper story before any manuscript section is drafted. Use the approved question, verified literature, and completed analysis. "
+        "State thesis, gap, contribution boundary, supported claims, and claims to avoid. Do not infer causality or novelty.\n" +
+        json.dumps({"topic": a["topic"], "plan": brief.model_dump(), "literature": literature,
+                    "analysis_evidence": analysis_evidence}, ensure_ascii=False, default=str), PaperStory)
+    run["artifacts"]["paper_story"] = dumped(story)
+    run["artifacts"]["paper_state"] = {"schema_version": "httm/paper-state-v1", "mode": "empirical",
+        "stage": "writing", "required_artifacts": ["paper_story", "claim_evidence_map", "analysis"],
+        "blockers": ["Bản thảo, claim-evidence map và kiểm chứng đang chờ hoàn tất."],
+        "build": {"status": "not_run", "format": "Markdown/PDF"}}
     return result
 
 
@@ -228,17 +341,29 @@ async def ensure_question(run):
 
 async def manuscript(run):
     a = run["artifacts"]
+    brief = ResearchBrief.model_validate(a["research_plan"])
+    papers = [paper for paper in await evidence(run["project_id"])
+              if paper["id"] in set(brief.evidence_paper_ids)]
+    paper_story = a.get("paper_story")
+    if not paper_story:
+        paper_story = await generate_structured(VIETNAMESE_WRITING_RULE +
+        "Before final framing, define the paper story from the approved question, verified literature, and completed analysis. "
+        "State the thesis, literature gap, contribution boundary, claims supported by this run, and claims to avoid. "
+        "Do not infer causality or novelty. Treat numeric analysis as the only source of empirical claims.\n" +
+        json.dumps({"topic": a["topic"], "plan": brief.model_dump(), "literature": papers,
+                    "analysis": a["analysis"], "limitations": a["analysis"].get("limitations", [])},
+                   ensure_ascii=False, default=str), PaperStory)
     front = await generate_structured(VIETNAMESE_WRITING_RULE +
         "Viết title, abstract, keywords cho bản thảo dưới đây. Không tạo tác giả. "
         "Abstract chỉ dùng số liệu từ kết quả thực tế, không suy luận nhân quả, không thêm số từ literature. "
         "Không tự nhận là nghiên cứu đầu tiên. Nêu giới hạn quan trọng và phạm vi mẫu.\n" +
-        json.dumps({"topic": a["topic"], "brief": a["research_plan"],
+        json.dumps({"topic": a["topic"], "brief": brief.model_dump(), "paper_story": dumped(paper_story),
                     "results": a["analysis"]["results_draft"], "discussion": a["discussion"],
                     "feedback": a.get("feedback", "")}, ensure_ascii=False, default=str), FrontMatter)
     intro = a["introduction"]["introduction"]
     work = a["related_work"]["related_work"]
     disc = a["discussion"]["discussion"]
-    refs = await evidence(run["project_id"])
+    refs = papers
     # Preserve canonical [paper_id] references; never fabricate author metadata.
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("SELECT id,title,authors,year,doi,venue FROM papers WHERE project_id=$1 ORDER BY id", run["project_id"])
@@ -263,6 +388,42 @@ async def manuscript(run):
     for ref in references:
         if isinstance(ref["authors"], str):
             ref["authors"] = json.loads(ref["authors"])
+    allowed_papers = {paper["id"] for paper in refs}
+    allowed_sources = {selection["source_key"] for selection in a["design"].get("sources", [])}
+    map_papers = [{key: paper.get(key) for key in ("id", "title", "year", "doi", "method", "key_finding", "limitation")}
+                  for paper in refs if paper["id"] in allowed_papers]
+    map_analysis = {key: a["analysis"].get(key) for key in (
+        "methods_draft", "results_draft", "ols_regression", "correlation_pearson", "limitations")
+                    if a["analysis"].get(key) is not None}
+    claim_map = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Map the manuscript's decision-relevant factual claims to evidence. Include key claims, not every sentence. "
+        "supported_literature requires paper IDs from the supplied read-paper corpus; supported_data requires source keys from the approved design; "
+        "proposed is for planned work and unsupported is for claims without supplied evidence. Do not invent IDs or strengthen claims.\n" +
+        json.dumps({"paper_story": dumped(paper_story), "sections": sections, "papers": map_papers,
+                    "analysis_evidence": map_analysis, "approved_source_keys": sorted(allowed_sources)},
+                   ensure_ascii=False, default=str), ClaimEvidenceMap)
+    claims = dumped(claim_map)
+    for claim in claims["claims"]:
+        bad_ids = set(claim.get("evidence_paper_ids", [])) - allowed_papers
+        bad_keys = set(claim.get("source_keys", [])) - allowed_sources
+        claim["evidence_paper_ids"] = sorted(set(claim.get("evidence_paper_ids", [])) & allowed_papers)
+        claim["source_keys"] = sorted(set(claim.get("source_keys", [])) & allowed_sources)
+        if bad_ids or bad_keys or (claim["status"] == "supported_literature" and not claim["evidence_paper_ids"]) or (
+                claim["status"] == "supported_data" and not claim["source_keys"]):
+            claim["status"] = "unsupported"
+            claim["rationale"] += " Hệ thống không xác nhận được nguồn bằng chứng đã khai báo."
+    cited.update(paper_id for claim in claims["claims"] for paper_id in claim.get("evidence_paper_ids", []))
+    references = [dict(row) for row in rows if row["id"] in cited]
+    for ref in references:
+        if isinstance(ref["authors"], str):
+            ref["authors"] = json.loads(ref["authors"])
+    a["paper_story"] = dumped(paper_story)
+    a["claim_evidence_map"] = claims
+    a["paper_state"] = {"schema_version": "httm/paper-state-v1", "mode": "empirical",
+        "stage": "verification_pending", "required_artifacts": ["paper_story", "claim_evidence_map", "analysis"],
+        "blockers": ["Đang chờ kiểm chứng trích dẫn, con số và nội dung khoa học."],
+        "build": {"status": "not_run", "format": "Markdown/PDF"}}
     return front.model_dump() | {"authors": a["settings"]["authors"], "sections": sections,
         "references": references, "tables": a["analysis"].get("column_summaries", {}),
         "charts": a["analysis"].get("charts", {}), "evidence": refs,
@@ -307,6 +468,15 @@ async def verify(run):
         json.dumps({"manuscript": draft, "design": a["design"], "analysis": a["analysis"]},
                    ensure_ascii=False, default=str), ScientificAudit)
     issues += [i.model_dump() for i in audit.issues]
+    for claim in a.get("claim_evidence_map", {}).get("claims", []):
+        if claim.get("status") == "unsupported":
+            issues.append({"section": claim.get("section", "Unknown"), "claim": claim.get("claim", ""),
+                           "reason": "Claim-evidence map chưa gắn được bằng chứng đã xác minh.", "severity": "error"})
+    paper_state = a.get("paper_state")
+    if paper_state:
+        blockers = [issue["reason"] for issue in issues if issue["severity"] == "error"]
+        paper_state["stage"] = "verification_passed_pending_author" if not blockers else "blocked"
+        paper_state["blockers"] = list(dict.fromkeys(blockers))
     return {"ok": not any(i["severity"] == "error" for i in issues), "issues": issues,
         "citation_reports": citations, "source_checks": source_report,
         "limitations": audit.limitations + ["Kiểm chứng ngữ nghĩa dùng LLM; cần người nghiên cứu xem lại nguồn gốc."]}
@@ -316,6 +486,11 @@ async def execute_stage(run):
     from app.routers import search, analysis, synthesis, writer, related_work, discussion
     from app.models import WriteDiscussionRequest
     stage, pid = run["stage"], run["project_id"]
+    from .state import is_review
+    if is_review(run) and stage in ("research_plan", "manuscript", "verification"):
+        from . import literature
+        return await {"research_plan": literature.plan, "manuscript": literature.manuscript,
+                      "verification": literature.verify}[stage](run)
     if stage == "literature_search":
         result = await search.run_search(pid)
         if not result.found:

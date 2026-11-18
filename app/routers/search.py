@@ -127,6 +127,8 @@ async def run_search(project_id: int) -> SearchResponse:
     today = date.today()
     try:
         concepts = await extract_topic_concepts(plan)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Cannot extract topic concepts")
         raise HTTPException(status_code=502, detail="Không xác định được các khái niệm của đề tài.") from exc
@@ -178,6 +180,8 @@ async def run_search(project_id: int) -> SearchResponse:
         if fresh:
             try:
                 relevant = await screen_papers(fresh, plan, concepts=concepts)
+            except HTTPException:
+                raise
             except Exception as exc:
                 logger.exception("Relevance screening failed")
                 raise HTTPException(status_code=502, detail="Lọc độ liên quan thất bại; chưa lưu paper chưa kiểm duyệt.") from exc

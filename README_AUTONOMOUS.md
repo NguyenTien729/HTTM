@@ -3,7 +3,30 @@
 Luồng tự động được tích hợp vào FastAPI hiện có. Mở `/` hoặc
 `/ui/autonomous.html`. Giao diện thao tác từng bước vẫn ở `/ui/index.html`.
 
-## Quy trình đang hoạt động
+## Nhánh nghiên cứu tài liệu (mặc định)
+
+Chọn **Nghiên cứu tài liệu → bài tổng quan** khi tạo run. Project có sẵn phải
+có loại `review`; các run thực nghiệm cũ vẫn giữ nguyên loại và lịch sử.
+
+Luồng: tìm tài liệu → đọc và trích xuất → tổng hợp chủ đề → duyệt phạm vi →
+viết từng phần → kiểm chứng và tự sửa (tối đa ba vòng) → duyệt bản cuối.
+Không yêu cầu dataset hay chạy hồi quy trong nhánh này.
+
+Tập nguồn, trích đoạn và nhật ký tìm kiếm được lưu vào hồ sơ run trước khi duyệt
+phạm vi. Mỗi đoạn viết gắn mã tài liệu, mã nguồn và trích đoạn nguyên văn.
+Kiểm chứng kiểm tra trích dẫn, số liệu và mức hỗ trợ của nguồn; nếu còn lỗi sau
+tự sửa, người dùng có thể yêu cầu chỉnh sửa bản thảo. PDF và DOCX chỉ xuất sau
+kiểm chứng và phê duyệt; Markdown và hồ sơ bằng chứng JSON có thể tải trước.
+
+Đầu ra là **bài tổng quan tường thuật**, không tự nhận là tổng quan hệ thống,
+PRISMA hay nghiên cứu thực nghiệm mới. Kiểm chứng nội dung bằng LLM vẫn cần
+người nghiên cứu rà soát.
+
+Ứng dụng trong Docker dùng mã đã đóng gói trong image. Cập nhật bằng
+`docker compose up -d --build --no-deps app`, sau đó tải lại trang. Database
+và volume nghiên cứu được giữ nguyên.
+
+## Nhánh thực nghiệm
 
 1. Người dùng nhập đề tài, tùy chọn địa bàn và tác giả, hoặc chọn project đã có.
 2. Hệ thống tìm bài báo, đọc PDF mở khi có, dùng abstract khi không đọc được PDF,

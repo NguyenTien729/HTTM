@@ -12,6 +12,17 @@ STAGES = ("literature_search", "literature_read", "literature_synthesis", "resea
 GATES = {"research_plan": "awaiting_research_approval", "design": "awaiting_design_approval",
          "verification": "awaiting_final_approval"}
 
+REVIEW_STAGES = ("literature_search", "literature_read", "literature_synthesis",
+                 "research_plan", "manuscript", "verification")
+
+
+def is_review(run):
+    return run["artifacts"].get("settings", {}).get("paper_type") == "review"
+
+
+def stages_for(run):
+    return REVIEW_STAGES if is_review(run) else STAGES
+
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
@@ -45,14 +56,33 @@ def decide(run, request):
             "fingerprint": fingerprint(artifacts[run["stage"]])})
         if status == "awaiting_final_approval":
             run["status"] = "completed"
+            if artifacts.get("paper_state"):
+                artifacts["paper_state"]["stage"] = "complete"
+                artifacts["paper_state"]["blockers"] = []
         else:
-            run["stage"] = STAGES[STAGES.index(run["stage"]) + 1]
+            stages = stages_for(run)
+            run["stage"] = stages[stages.index(run["stage"]) + 1]
             run["status"] = "queued"
         event(run, "Người dùng đã phê duyệt: " + request.notes)
     else:
         if not request.notes.strip():
             raise HTTPException(422, "Hãy nêu yêu cầu điều chỉnh.")
         run["revision"] += 1
+        if is_review(run):
+            restart = request.restart_from or ("research_plan" if status == "awaiting_research_approval" else "manuscript")
+            allowed_review = {"research_plan"} if status == "awaiting_research_approval" else {"research_plan", "manuscript", "verification"}
+            if restart not in allowed_review:
+                raise HTTPException(409, "Bài tổng quan chỉ quay lại kế hoạch hoặc bản thảo.")
+            keep = {"settings", "topic", "literature_search", "literature_read", "literature_synthesis", "approvals", "review_corpus"}
+            if restart in ("manuscript", "verification"):
+                keep.add("research_plan")
+            if restart == "verification":
+                keep |= {"review_document", "manuscript"}
+            run["artifacts"] = {k: v for k, v in artifacts.items() if k in keep}
+            run["artifacts"]["feedback"] = request.notes
+            run.update(stage=restart, status="queued", error=None)
+            event(run, "Yêu cầu sửa bài tổng quan: " + request.notes)
+            return run
         # A research revision invalidates discovery, design, analysis and writing.
         # A design revision rechecks data; final revision only rewrites the draft.
         restart = {"awaiting_research_approval": "research_plan",
@@ -128,7 +158,8 @@ def finish_stage(run, output):
     if stage in GATES:
         run["status"] = GATES[stage]
     else:
-        run["stage"] = STAGES[STAGES.index(stage) + 1]
+        stages = stages_for(run)
+        run["stage"] = stages[stages.index(stage) + 1]
         run["status"] = "queued"
     event(run, "Hoàn tất " + stage, stage=stage)
     return run

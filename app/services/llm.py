@@ -106,6 +106,11 @@ async def generate_structured(prompt: str, schema: Type[T]) -> T:
             )
         except APIStatusError as exc:
             logger.error("DeepSeek HTTP %s (lần %d/%d): %s", exc.status_code, attempt, _MAX_ATTEMPTS, exc)
+            if exc.status_code == 402:
+                raise HTTPException(status_code=502, detail=(
+                    "DeepSeek API không đủ số dư (HTTP 402). Hãy nạp số dư cho tài khoản API "
+                    "hoặc cấu hình khóa API của tài khoản còn số dư, rồi tiếp tục bước đang dở."
+                )) from exc
             if exc.status_code in _FATAL_STATUS:
                 raise HTTPException(
                     status_code=502,

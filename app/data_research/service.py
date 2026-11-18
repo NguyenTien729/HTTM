@@ -41,6 +41,24 @@ MAX_PREVIEW_ROWS = 20
 
 _DATASET_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+_COUNTRY_CONTINENTS = {
+    "vietnam": "asia", "viet nam": "asia", "china": "asia", "india": "asia",
+    "japan": "asia", "indonesia": "asia", "thailand": "asia", "malaysia": "asia",
+    "united states": "north america", "usa": "north america", "canada": "north america",
+    "mexico": "north america", "brazil": "south america", "argentina": "south america",
+    "united kingdom": "europe", "uk": "europe", "france": "europe", "germany": "europe",
+    "spain": "europe", "italy": "europe", "africa": "africa", "europe": "europe",
+    "asia": "asia", "oceania": "oceania",
+}
+_CONTINENT_MARKERS = {
+    "asia": ("asia", "asian", "east asia", "south asia", "southeast asia"),
+    "europe": ("europe", "european", "european union", "eu"),
+    "africa": ("africa", "african"),
+    "north america": ("north america", "north american"),
+    "south america": ("south america", "south american", "latin america", "latin american"),
+    "oceania": ("oceania", "oceanian", "australia", "pacific islands"),
+}
+
 
 class DataResearchError(Exception):
     """An expected, user-displayable error from the Data Research workflow."""
@@ -181,6 +199,22 @@ def _scope_terms(gap):
     if any(_has_phrase(topic, alias) for alias in aliases):
         terms.extend(aliases)
     return list(dict.fromkeys(t for t in terms if t))
+
+
+def _explicit_geography_conflict(candidate, gap):
+    """Reject an explicitly different continent while keeping global/unknown sources reviewable."""
+    scope = _normalized_text(" ".join(_scope_terms(gap)) or _search_topic(gap))
+    target_continent = next((continent for country, continent in _COUNTRY_CONTINENTS.items()
+                             if _has_phrase(scope, country)), None)
+    if not target_continent:
+        return None
+    title = _normalized_text(candidate.get("title", ""))
+    for continent, markers in _CONTINENT_MARKERS.items():
+        if continent == target_continent:
+            continue
+        if any(_has_phrase(title, marker) for marker in markers):
+            return "title_explicitly_outside_target_continent:" + continent
+    return None
 
 
 def _dataset_short_queries(gap):
@@ -348,6 +382,10 @@ def _to_candidate(item: dict[str, Any], queries: list[str]) -> dict[str, Any]:
 
 def _candidate_relevance(candidate, gap):
     """Require evidence in metadata, independently of LLM-generated search terms."""
+    geography_conflict = _explicit_geography_conflict(candidate, gap)
+    if geography_conflict:
+        candidate["_rejection_reasons"] = [geography_conflict]
+        return False
     # Persona generators mention many occupations, but those mentions do not
     # make their synthetic profiles an observed sample for domain research.
     title = _normalized_text(candidate.get("title", ""))

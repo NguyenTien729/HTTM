@@ -2,13 +2,14 @@
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
 from pydantic import BaseModel, Field
 
 from app.data_research.service import (
-    DataResearchError, _json_safe, discover_gap_datasets,
+    DataResearchError, _explicit_geography_conflict, _json_safe, discover_gap_datasets,
     download_dataset_dataframe, inspect_dataset,
 )
 from .models import AnalysisDesign, ResearchBrief
@@ -108,7 +109,19 @@ async def collect(run, progress=None):
     budget = max(1., float(settings.get("collection_seconds", 180)))
     deadline = started + budget
     previous_collection = run["artifacts"].get("data_collection") or {}
-    sources = [dict(source) for source in previous_collection.get("sources", [])]
+    target_scope = {"project_topic": " ".join([brief.geography, brief.time_scope]),
+                    "_search_scope_terms": brief.geography_terms}
+    sources, rejected_previous_sources = [], []
+    for source in previous_collection.get("sources", []):
+        source = dict(source)
+        candidate = source.get("candidate", {})
+        conflict = _explicit_geography_conflict(candidate, target_scope)
+        if conflict:
+            rejected_previous_sources.append({"dataset_id": candidate.get("dataset_id"),
+                                              "title": candidate.get("title", ""),
+                                              "reason": conflict})
+        else:
+            sources.append(source)
     previous_candidates = {source.get("candidate", {}).get("dataset_id"): source.get("candidate", {})
                            for source in sources if source.get("candidate", {}).get("dataset_id")}
     candidates = {dataset_id: dict(candidate) for dataset_id, candidate in previous_candidates.items()}
@@ -244,7 +257,8 @@ async def collect(run, progress=None):
     known_dataset_ids = set(previous_candidates)
     ranked_all = sorted((candidate for candidate in candidates.values()
                          if candidate.get("dataset_id") not in known_dataset_ids),
-                        key=lambda c: (-len(c.get("requirements", [])),
+                        key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
+                       -len(c.get("requirements", [])),
                        -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
                        c.get("dataset_id", "")))
     # Give each required variable a chance to contribute a source before using
@@ -326,7 +340,8 @@ async def collect(run, progress=None):
                                                              if item["requirement"] == need.key)),
                         "searches": [item["search"] for item in searches if item["requirement"] == need.key]}
                        for need in needs]
-    return {"sources": sources, "searches": searches, "search_coverage": search_coverage, "errors": errors,
+    return {"sources": sources, "searches": searches, "search_coverage": search_coverage,
+            "rejected_previous_sources": rejected_previous_sources, "errors": errors,
             "search_guidance": {"round": guidance.get("round", 0), "targeted_need_keys": sorted(targeted_keys),
                                 "supplemental_queries": supplemental_queries,
                                 "excluded_previous_dataset_ids": excluded_ids},
@@ -437,6 +452,19 @@ def prepare_data(run_id, brief, design, collection, max_rows):
     required = {n.key for n in brief.data_needs if n.required}
     if required - set(frame):
         raise ValueError("Thiếu biến bắt buộc: " + ", ".join(sorted(required-set(frame))))
+    year_need = next((n for n in brief.data_needs if n.role == "join_key" and n.key == "year"), None)
+    requested_years = re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", brief.time_scope)
+    if year_need and year_need.key in frame and len(requested_years) >= 2:
+        expected_start, expected_end = int(requested_years[0]), int(requested_years[1])
+        observed_years = pd.to_numeric(frame[year_need.key], errors="coerce").dropna()
+        if observed_years.empty:
+            raise ValueError("Không tìm thấy năm quan sát dạng số sau khi ghép và lọc nguồn.")
+        actual_start, actual_end = int(observed_years.min()), int(observed_years.max())
+        if actual_start > expected_start or actual_end < expected_end:
+            raise ValueError(
+                f"Độ phủ thời gian không đủ: dữ liệu có {actual_start}–{actual_end}, "
+                f"kế hoạch yêu cầu {expected_start}–{expected_end}."
+            )
     if design.target not in frame or needs[design.target].role != "outcome":
         raise ValueError("Biến kết quả chưa đúng yêu cầu nghiên cứu.")
     if not pd.api.types.is_numeric_dtype(frame[design.target]):

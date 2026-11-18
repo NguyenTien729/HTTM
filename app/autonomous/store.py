@@ -110,6 +110,30 @@ async def change(run_id, request, action="decision"):
             return await _write(conn, run, request.expected_version)
 
 
+async def save_proposal_revision(run_id, expected_version, draft, instruction):
+    """Persist a user-requested proposal continuation with optimistic versioning."""
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT * FROM autonomous_runs WHERE id=$1 FOR UPDATE", run_id)
+            if not row:
+                raise HTTPException(404, "Không tìm thấy tiến trình.")
+            run = decode(row)
+            check_version(run, expected_version)
+            if not run["artifacts"].get("proposal_draft"):
+                raise HTTPException(409, "Run này chưa có bản đề xuất để viết tiếp.")
+            run["artifacts"]["proposal_draft"] = draft
+            run["artifacts"]["claim_evidence_map"] = draft["claim_evidence_map"]
+            run["artifacts"].pop("proposal_draft_error", None)
+            state = run["artifacts"].setdefault("paper_state", {})
+            state["stage"] = "draft_with_blockers"
+            state["blockers"] = draft.get("blockers", [])
+            event(run, "Người dùng yêu cầu viết tiếp bản đề xuất: " + instruction[:240])
+            saved = await _write(conn, run, expected_version)
+            if not saved:
+                raise HTTPException(409, "Run đã thay đổi; hãy tải lại trước khi viết tiếp.")
+            return saved
+
+
 async def claim():
     async with get_pool().acquire() as conn:
         async with conn.transaction():

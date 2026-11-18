@@ -212,6 +212,33 @@ async def suggest_alternatives(run, brief, collection, blockers):
                     "và giữ nguyên các nguồn đã tải. Thiết kế và phân tích vẫn được kiểm tra lại đầy đủ."}
 
 
+def align_units(proposed, brief):
+    """Use the approved unit label for bindings that declare no conversion.
+
+    The planner writes units in Vietnamese ("USD/giờ", "năm") while the design
+    LLM may write the same unit in English ("USD/hour", "years"). A binding with
+    scale 1 and offset 0 asserts the column is already in the approved unit, so
+    its labels are set to that unit. Bindings that declare a real conversion
+    keep their labels and remain subject to the strict unit checks.
+    """
+    units = {need.key: need.unit for need in brief.data_needs}
+    value = proposed.model_dump()
+    changed = []
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            unit = units.get(binding["variable"])
+            if unit is None or binding["target_unit"] == unit:
+                continue
+            if binding["scale"] == 1 and binding["offset"] == 0:
+                changed.append(f"{binding['variable']}: '{binding['target_unit']}' → '{unit}'")
+                binding["target_unit"] = binding["source_unit"] = unit
+    if not changed:
+        return proposed
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Cột được dùng đúng đơn vị đã duyệt, không đổi đơn vị (chuẩn hóa nhãn: " + "; ".join(changed) + ")."]
+    return AnalysisDesign.model_validate(value)
+
+
 async def design(run):
     approved(run, "research_plan")
     collection = run["artifacts"]["data_collection"]
@@ -250,6 +277,7 @@ async def design(run):
             + json.dumps(brief.model_dump(), ensure_ascii=False) + "\n"
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
+    proposed = align_units(proposed, brief)
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,

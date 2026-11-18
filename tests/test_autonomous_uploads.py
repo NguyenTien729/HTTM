@@ -366,3 +366,39 @@ async def test_design_stage_freezes_the_reduced_model_and_passes_validation(monk
     result = await pipeline.design(value)
     assert value["artifacts"]["design_validation"]["ok"] is True
     assert result["predictors"] == ["schooling"] and any("sex" in item for item in result["limitations"])
+
+
+async def test_design_accepts_same_unit_written_differently_but_not_undeclared_conversions(monkeypatch):
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.state import fingerprint
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "cá nhân", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "mã"), ("wage", "outcome", "USD/giờ"),
+                                    ("schooling", "exposure", "năm"), ("region", "exposure", "phân loại")]],
+        feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{'south' if i % 2 else 'other'}\n" for i, (w, e) in
+                   enumerate([("5,1", 8), ("6,7", 12), ("4", 11), ("7,5", 13), ("13,1", 16), ("4,45", 10), ("19,5", 18)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;vung\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    value["artifacts"].update(research_plan=plan, data_collection={"sources": value["artifacts"]["user_sources"]},
+                              approvals=[{"stage": "research_plan", "fingerprint": fingerprint(plan)}])
+    english = lambda var, col, unit, **kw: {"variable": var, "column": col, "source_unit": unit, "target_unit": unit,
+                                            "rationale": "Cột gốc", **kw}
+    proposal = {"bindings": [english("wage", "luong", "USD/hour"), english("schooling", "hoc", "years"),
+                             english("region", "vung", "category")]}
+
+    async def llm(prompt, schema):
+        return AnalysisDesign(adequate=True, rationale="Một nguồn", method="ols", target="wage",
+                              predictors=["schooling", "region"], sources=[{"source_key": "s01", **proposal}])
+    monkeypatch.setattr(pipeline, "generate_structured", llm)
+    result = await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is True
+    assert result["predictors"] == ["schooling"]
+    assert {b["target_unit"] for b in result["sources"][0]["bindings"]} == {"USD/giờ", "năm", "phân loại"}
+    # A declared conversion keeps its labels, so a wrong target unit is still refused.
+    proposal["bindings"][0] = english("wage", "luong", "cents/hour", scale=0.01)
+    proposal["bindings"][0]["target_unit"] = "USD/hour"
+    await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is False

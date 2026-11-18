@@ -9,6 +9,22 @@ from app.models import (
 from tests.helpers import sample_plan, insert_project, insert_paper
 
 
+def mock_search_screening(monkeypatch):
+    """Keep provider/merge tests offline after topical screening was added."""
+    async def concepts(*args):
+        from app.services.relevance_filter import TopicConcepts
+        return TopicConcepts(concepts=["AI", "students"], scope_rule="AI and student productivity")
+    async def screen(papers, *args, **kwargs):
+        return [(p, 90) for p in papers]
+    # Crossref is a third live provider: without this the tests hit the real API
+    # on CI (which has internet) and receive real papers.
+    async def no_crossref(*args, **kwargs):
+        return []
+    monkeypatch.setattr("app.routers.search.extract_topic_concepts", concepts)
+    monkeypatch.setattr("app.routers.search.screen_papers", screen)
+    monkeypatch.setattr("app.routers.search.search_crossref", no_crossref)
+
+
 async def test_plan_create_and_get(client, monkeypatch):
     async def fake_llm(prompt, schema):
         return sample_plan()
@@ -28,6 +44,7 @@ async def test_plan_create_and_get(client, monkeypatch):
 
 
 async def test_search_merges_sources_and_dedupes(client, monkeypatch):
+    mock_search_screening(monkeypatch)
     async with db.get_pool().acquire() as conn:
         pid = await insert_project(conn)
 
@@ -64,6 +81,7 @@ async def test_search_merges_sources_and_dedupes(client, monkeypatch):
 
 
 async def test_search_openalex_failure_returns_502(client, monkeypatch):
+    mock_search_screening(monkeypatch)
     async with db.get_pool().acquire() as conn:
         pid = await insert_project(conn)
 
@@ -83,7 +101,9 @@ async def test_analyze_falls_back_to_abstract(client, monkeypatch):
 
     async def fake_llm(prompt, schema):
         prompts.append(prompt)
-        return PaperAnalysisExtraction(key_finding="AI giúp học tốt hơn", method="Survey")
+        # A complete extraction: an empty plain-language summary is re-analysed by design.
+        return PaperAnalysisExtraction(key_finding="AI giúp học tốt hơn", method="Survey",
+                                       plain_language_summary="Nghiên cứu cho thấy AI hỗ trợ việc học.")
     monkeypatch.setattr("app.routers.analysis.generate_structured", fake_llm)
 
     r = await client.post(f"/analyze/{pid}")

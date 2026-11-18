@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.db import get_pool
 from app.services.llm import generate_structured
+from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/research-questions", tags=["rq-generator"])
@@ -123,6 +124,40 @@ async def generate_research_question(gap_id: int) -> GenerateRQResponse:
 
     rq = _row_to_research_question(dict(row))
     return GenerateRQResponse(project_id=gap["project_id"], gap_id=gap_id, research_question=rq)
+
+
+@router.post("/project/{project_id}", response_model=GenerateRQResponse)
+async def generate_topic_question(project_id: int):
+    """Branch A: derive an operational question directly from the saved topic, no gap."""
+    async with get_pool().acquire() as conn:
+        project = await conn.fetchrow("SELECT topic, paper_type FROM research_projects WHERE id=$1", project_id)
+        if not project:
+            raise HTTPException(404, "Không tìm thấy project.")
+        if project["paper_type"] != "topic_research":
+            raise HTTPException(409, "Endpoint này dành cho hướng A nghiên cứu trực tiếp theo đề tài.")
+        evidence = await conn.fetch(
+            """SELECT p.title, pa.key_finding FROM paper_analyses pa JOIN papers p ON p.id=pa.paper_id
+               WHERE p.project_id=$1 ORDER BY p.id LIMIT 30""", project_id)
+    extracted = await generate_structured(
+        VIETNAMESE_WRITING_RULE + f"Đề tài chính xác của project: {project['topic']}\n"
+        "Hướng A: cụ thể hóa đề tài này thành một câu hỏi nghiên cứu khả thi với dữ liệu thứ cấp. "
+        "Giữ đúng biến, đối tượng, địa bàn và quan hệ được nêu trong đề tài; không đổi sang vấn đề khác. "
+        "KHÔNG phân tích khoảng trống, KHÔNG sinh câu hỏi từ gap hoặc đề xuất giả thuyết mới. "
+        "hypotheses phải rỗng. Variables chỉ là khái niệm cần đo, chưa phải tên cột dataset. "
+        "Không khẳng định đã tìm được dataset hoặc tính được kết quả. Đánh giá feasibility thận trọng; "
+        "novelty_score=1 và novelty_notes ghi rõ chưa đánh giá tính mới từ gap. "
+        "Đề tài nói tác động không có nghĩa dữ liệu quan sát cho phép suy luận nhân quả. "
+        "Các phát hiện sau đây chỉ giúp làm rõ cách đo biến, không thay thế đề tài:\n"
+        + json.dumps([dict(row) for row in evidence], ensure_ascii=False), ResearchQuestionExtraction)
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO research_questions
+               (project_id,gap_id,rq_text,feasibility_score,feasibility_notes,novelty_score,novelty_notes,is_quantitative,variables,hypotheses)
+               VALUES($1,NULL,$2,$3,$4,1,$5,$6,$7::jsonb,'[]'::jsonb) RETURNING *""",
+            project_id, extracted.candidate_rq, extracted.feasibility_score, extracted.feasibility_notes,
+            "Câu hỏi bám đề tài project; chưa đánh giá tính mới từ khoảng trống nghiên cứu.",
+            extracted.is_quantitative, json.dumps([v.model_dump() for v in extracted.variables], ensure_ascii=False))
+    return GenerateRQResponse(project_id=project_id, gap_id=None, research_question=_row_to_research_question(dict(row)))
 
 
 @router.get("/project/{project_id}", response_model=list[ResearchQuestion])

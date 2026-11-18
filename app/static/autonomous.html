@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HTTM · Nghiên cứu tự động</title>
+  <link rel="stylesheet" href="autonomous.css">
+</head>
+<body>
+<header><a class="brand" href="autonomous.html">HTTM <span>Research</span></a><nav><a href="index.html">Công cụ từng bước</a><a href="/docs">API</a></nav></header>
+<main>
+  <section class="intro"><div class="eyebrow">AUTONOMOUS SCIENTIFIC RESEARCH</div><h1>Từ câu hỏi đến bản thảo,<br>với quyết định của bạn.</h1><p>AI thu thập bằng chứng, đề xuất dữ liệu và phân tích. Bạn duyệt câu hỏi, thiết kế nghiên cứu và bản thảo cuối.</p></section>
+  <div id="message" role="alert" hidden></div>
+  <div class="layout">
+    <aside>
+      <section class="card"><h2>Nghiên cứu mới</h2><form id="start-form">
+        <label>Loại nghiên cứu<select id="paper-type"><option value="review">Nghiên cứu tài liệu → bài tổng quan</option><option value="original_research">Nghiên cứu thực nghiệm → phân tích dữ liệu</option></select></label>
+        <label>Chủ đề<textarea id="topic" required rows="4" placeholder="Ảnh hưởng của biến đổi khí hậu đến năng suất lúa tại Việt Nam"></textarea></label>
+        <label>Địa bàn cụ thể <input id="region" placeholder="Việt Nam (nếu có)"></label>
+        <label>Tác giả <textarea id="authors" rows="2" placeholder="Mỗi dòng: Họ tên | Đơn vị | Email"></textarea></label>
+        <details><summary>Tùy chọn nghiên cứu</summary>
+          <label>Số bài báo mục tiêu<input id="papers" type="number" min="3" max="50" value="15"></label>
+          <label>Số nguồn dữ liệu tối đa<input id="sources" type="number" min="1" max="10" value="6"></label>
+          <label>Giới hạn dòng mỗi nguồn<input id="rows" type="number" min="100" max="50000" value="10000"></label>
+          <label>Hoặc dùng project đã có<input id="project" type="number" min="1" placeholder="ID project; bỏ trống để tạo mới"></label>
+        </details>
+        <button class="primary" type="submit">Bắt đầu nghiên cứu</button>
+        <small>Nhánh tổng quan dùng tài liệu đã kiểm chứng, không yêu cầu dataset. Nhánh thực nghiệm cần dữ liệu để phân tích.</small>
+      </form></section>
+      <section class="card"><div class="heading"><h2>Các tiến trình</h2><button id="refresh" class="text">Làm mới</button></div><div id="history"></div></section>
+    </aside>
+    <div id="workspace" aria-live="polite"><section class="card empty"><div class="eyebrow">06 VAI TRÒ · 03 ĐIỂM PHÊ DUYỆT</div><h2>Một hồ sơ nghiên cứu xuyên suốt</h2><p>Tài liệu → Câu hỏi & giả thuyết → Dữ liệu → Phương pháp & phân tích → Viết bài → Kiểm chứng.</p><p>Tiến trình được lưu trên máy chủ. Bạn có thể đóng trang và tiếp tục xem lại sau.</p></section></div>
+  </div>
+</main>
+<script src="autonomous.js?v=6" defer></script>
+</body></html>

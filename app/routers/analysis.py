@@ -15,6 +15,7 @@ null nếu abstract không nêu rõ — KHÔNG suy đoán thêm, tránh hallucin
 
 import asyncio
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException
 
@@ -37,7 +38,7 @@ async def _fetch_papers_to_analyze(project_id: int) -> list[dict]:
             FROM papers p
             LEFT JOIN paper_analyses pa ON pa.paper_id = p.id
             WHERE p.project_id = $1
-              AND pa.id IS NULL
+              AND (pa.id IS NULL OR pa.plain_language_summary = '')
               AND ((p.abstract IS NOT NULL AND p.abstract <> '') OR p.pdf_url IS NOT NULL);
             """,
             project_id,
@@ -90,7 +91,19 @@ async def _analyze_one(paper: dict, project_id: int, excerpts: list[str] | None 
             "bối cảnh (nếu có), phát hiện chính, và hạn chế (nếu abstract có đề cập). "
             "Nếu thông tin nào không có trong abstract, để null — KHÔNG suy đoán/bịa thêm."
         )
+    prompt += (
+        "\n\nWrite key_finding as a concise academic finding. Also provide plain_language_summary in clear Vietnamese: "
+        "state what was studied, what was found, and what the evidence does not prove. Explain technical terms briefly. "
+        "Do not infer causality from observational results. Clearly distinguish facts reported by the authors from interpretation. "
+        "If the supplied text does not state a detail, leave its field null rather than guessing."
+        " Provide one short, verbatim evidence_excerpt supporting the main finding, or null if no excerpt does so."
+    )
     extracted = await generate_structured(prompt, PaperAnalysisExtraction)
+    supplied_text = " ".join([paper["title"], abstract, *(excerpts or [])]).casefold()
+    quote = re.sub(r"\s+", " ", extracted.evidence_excerpt or "").strip()
+    normalized_source = re.sub(r"\s+", " ", supplied_text)
+    if not quote or len(quote) > 700 or re.sub(r"\s+", " ", quote.casefold()) not in normalized_source:
+        quote = None
     return PaperAnalysis(
         paper_id=paper["id"],
         project_id=project_id,
@@ -98,6 +111,10 @@ async def _analyze_one(paper: dict, project_id: int, excerpts: list[str] | None 
         population=extracted.population,
         context=extracted.context,
         key_finding=extracted.key_finding,
+        plain_language_summary=extracted.plain_language_summary,
+        evidence_excerpt=quote,
+        evidence_basis="fulltext_pdf_excerpts" if excerpts else "abstract_only",
+        title=paper["title"],
         limitation=extracted.limitation,
     )
 
@@ -107,9 +124,17 @@ async def _save_analysis(analysis: PaperAnalysis) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO paper_analyses (paper_id, project_id, method, population, context, key_finding, limitation)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (paper_id) DO NOTHING;
+            INSERT INTO paper_analyses (paper_id, project_id, method, population, context, key_finding, plain_language_summary, evidence_excerpt, evidence_basis, limitation)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (paper_id) DO UPDATE SET
+                method=EXCLUDED.method,
+                population=EXCLUDED.population,
+                context=EXCLUDED.context,
+                key_finding=EXCLUDED.key_finding,
+                plain_language_summary=EXCLUDED.plain_language_summary,
+                evidence_excerpt=EXCLUDED.evidence_excerpt,
+                evidence_basis=EXCLUDED.evidence_basis,
+                limitation=EXCLUDED.limitation;
             """,
             analysis.paper_id,
             analysis.project_id,
@@ -117,6 +142,9 @@ async def _save_analysis(analysis: PaperAnalysis) -> None:
             analysis.population,
             analysis.context,
             analysis.key_finding,
+            analysis.plain_language_summary,
+            analysis.evidence_excerpt,
+            analysis.evidence_basis,
             analysis.limitation,
         )
 
@@ -125,13 +153,15 @@ async def _fetch_all_analyses(project_id: int) -> list[PaperAnalysis]:
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM paper_analyses WHERE project_id = $1 ORDER BY id;", project_id
+            "SELECT pa.*, p.title FROM paper_analyses pa JOIN papers p ON p.id=pa.paper_id WHERE pa.project_id = $1 ORDER BY pa.id;", project_id
         )
     return [
         PaperAnalysis(
             id=r["id"], paper_id=r["paper_id"], project_id=r["project_id"],
             method=r["method"], population=r["population"], context=r["context"],
-            key_finding=r["key_finding"], limitation=r["limitation"],
+            key_finding=r["key_finding"], plain_language_summary=r["plain_language_summary"],
+            evidence_excerpt=r["evidence_excerpt"],
+            evidence_basis=r["evidence_basis"], title=r["title"], limitation=r["limitation"],
         )
         for r in rows
     ]

@@ -33,8 +33,8 @@ async def _fetch_analyses_with_title(project_id: int) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT pa.paper_id, p.title, pa.method, pa.population, pa.context,
-                   pa.key_finding, pa.limitation
+            SELECT pa.paper_id, p.title, p.year, p.authors, pa.method, pa.population, pa.context,
+                   pa.key_finding, pa.plain_language_summary, pa.evidence_excerpt, pa.evidence_basis, pa.limitation
             FROM paper_analyses pa
             JOIN papers p ON p.id = pa.paper_id
             WHERE pa.project_id = $1
@@ -49,9 +49,10 @@ def _format_analyses_for_prompt(analyses: list[dict]) -> str:
     lines = []
     for a in analyses:
         lines.append(
-            f"paper_id={a['paper_id']} | title=\"{a['title']}\" | "
+            f"paper_id={a['paper_id']} | title=\"{a['title']}\" | year={a['year']} | "
             f"method={a['method']} | population={a['population']} | context={a['context']} | "
-            f"finding=\"{a['key_finding']}\" | limitation={a['limitation']}"
+            f"finding=\"{a['key_finding']}\" | plain_summary=\"{a['plain_language_summary']}\" | "
+            f"evidence_excerpt=\"{a['evidence_excerpt']}\" | read_from={a['evidence_basis']} | limitation={a['limitation']}"
         )
     return "\n".join(lines)
 
@@ -79,16 +80,32 @@ async def synthesize_themes(project_id: int) -> SynthesizeResponse:
             detail="Chưa có paper nào được phân tích. Gọi POST /analyze/{project_id} trước.",
         )
 
+    async with get_pool().acquire() as conn:
+        project = await conn.fetchrow("SELECT topic, paper_type FROM research_projects WHERE id=$1", project_id)
+    topic_context = ""
+    if project and project["paper_type"] == "topic_research":
+        topic_context = (f"Đề tài chính xác của project: {project['topic']}. Hướng A: phân tích và tổng hợp "
+                         "bằng chứng theo đúng đề tài này; không phát hiện research gap hoặc đề xuất giả thuyết mới. "
+                         "Chỉ gom nhóm các kết quả liên quan đến biến, đối tượng và quan hệ trong đề tài.\n\n")
     prompt = (
+        topic_context +
         "Dưới đây là danh sách paper đã được phân tích (mỗi dòng 1 paper, có paper_id thật):\n\n"
         f"{_format_analyses_for_prompt(analyses)}\n\n"
         "Hãy gom các paper này thành các theme (nhóm phát hiện chính giống nhau hoặc đối lập nhau). "
+        "Tên và mô tả mọi chủ đề phải hoàn toàn bằng tiếng Việt học thuật, không trộn câu tiếng Anh. "
         "Mỗi theme cần: tên ngắn gọn, mô tả, và danh sách paper_id thuộc theme đó — "
         "PHẢI dùng đúng paper_id có trong danh sách trên, không được bịa số mới. "
         "1 paper có thể thuộc nhiều theme nếu phù hợp."
     )
 
+    prompt += (
+        "\n\nWrite each theme description in clear Vietnamese. Explain (1) the shared finding, "
+        "(2) whether studies agree or conflict, and (3) evidence limits and confidence. Use the supplied "
+        "plain-language summaries. Do not convert association into causation, generalize beyond reported "
+        "samples, or claim agreement from a single study. Every paper ID must be copied from the input."
+    )
     extracted = await generate_structured(prompt, ThemesExtraction)
+    valid_ids = {a["paper_id"] for a in analyses}
 
     pool = get_pool()
     saved_themes: list[Theme] = []
@@ -97,17 +114,20 @@ async def synthesize_themes(project_id: int) -> SynthesizeResponse:
             # Xoá theme cũ trước khi lưu bộ mới (MVP: không versioning theme)
             await conn.execute("DELETE FROM themes WHERE project_id = $1;", project_id)
             for t in extracted.themes:
+                evidence_ids = list(dict.fromkeys(pid for pid in t.paper_ids if pid in valid_ids))
+                if not evidence_ids:
+                    continue
                 row = await conn.fetchrow(
                     """
                     INSERT INTO themes (project_id, name, description, paper_ids)
                     VALUES ($1, $2, $3, $4::jsonb)
                     RETURNING id;
                     """,
-                    project_id, t.name, t.description, json.dumps(t.paper_ids),
+                    project_id, t.name, t.description, json.dumps(evidence_ids),
                 )
                 saved_themes.append(
                     Theme(id=row["id"], project_id=project_id, name=t.name,
-                          description=t.description, paper_ids=t.paper_ids)
+                          description=t.description, paper_ids=evidence_ids)
                 )
 
     return SynthesizeResponse(project_id=project_id, themes=saved_themes)

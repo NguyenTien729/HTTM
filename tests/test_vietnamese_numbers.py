@@ -19,3 +19,10 @@ def test_numbers_absent_from_the_analysis_are_still_flagged():
 
 def test_lists_and_sentence_punctuation_are_not_merged_into_decimals():
     assert _normalize_written_numbers("các năm 2010, 2015 và 3, 4 nhóm; 1,5.") == "các năm 2010, 2015 và 3, 4 nhóm; 1.5."
+
+
+def test_confidence_levels_are_method_constants_not_results():
+    text = "hệ số 0,926; khoảng tin cậy 95% HC3 0,751–1,100; 95% CI; confidence interval 99%."
+    source = '{"b": 0.92596, "lo": 0.75149, "hi": 1.10043}'
+    assert _find_unverified_numbers([text], source) == []
+    assert _find_unverified_numbers(["Có 95% người lao động thuộc nhóm này."], source) == ["95"]

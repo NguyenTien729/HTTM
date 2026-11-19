@@ -129,6 +129,12 @@ _VN_THOUSANDS_RE = re.compile(r"(?<![\d.,])\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\d|[.,
 _DECIMAL_COMMA_RE = re.compile(r"(?<![\d.,])(\d+),(\d+)(?!\d|[.,]\d)")
 
 
+_CONFIDENCE_LEVEL_RE = re.compile(
+    r"(?:(?:tin\s+cậy|confidence(?:\s+(?:interval|level))?|CI)\s*(?:\(\s*)?(?:ở\s+mức\s+)?(?:90|95|99)(?:\.\d+)?\s*%)"
+    r"|(?:(?:90|95|99)(?:\.\d+)?\s*%\s*(?:CI|confidence|khoảng\s+tin\s+cậy))",
+    re.IGNORECASE)
+
+
 def _normalize_written_numbers(text: str) -> str:
     """Vietnamese prose writes 0,3819 and 1.671,77; read them as 0.3819 and 1671.77.
 
@@ -149,6 +155,8 @@ def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]
     flagged: list[str] = []
     for text in sections:
         cleaned = _normalize_written_numbers(_CITATION_RE.sub(" ", text))
+        # Confidence levels ("khoảng tin cậy 95%", "95% CI") are method constants, not results.
+        cleaned = _CONFIDENCE_LEVEL_RE.sub(" ", cleaned)
         for token in _numbers_in(cleaned):
             has_decimal = "." in token
             value = float(token)

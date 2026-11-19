@@ -143,6 +143,11 @@ _SIGNIFICANCE_THRESHOLD_RE = re.compile(
     re.IGNORECASE)
 
 
+def _english_thousands(text: str) -> str:
+    """Read source figures such as "$10,000" as 10000 (English thousands separator)."""
+    return re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+
+
 def _normalize_written_numbers(text: str) -> str:
     """Vietnamese prose writes 0,3819 and 1.671,77; read them as 0.3819 and 1671.77.
 
@@ -320,7 +325,13 @@ async def write_discussion(
     ]
     citations_used, citations_invalid = _verify_citations(sections, valid_paper_ids)
     # Nguồn số liệu hợp lệ = kết quả phân tích + điểm RQ (không có số nào khác được phép).
-    numbers_unverified = _find_unverified_numbers(sections, analysis_json)
+    numbers_unverified = _find_unverified_numbers(
+        [text for text in sections if text is not discussion.literature_comparison_paragraph], analysis_json)
+    # The literature comparison may quote figures reported by the cited papers;
+    # those are checked against the evidence the writer was given.
+    literature_source = analysis_json + " " + _english_thousands(json.dumps(themes, ensure_ascii=False, default=str))
+    numbers_unverified += [n for n in _find_unverified_numbers([discussion.literature_comparison_paragraph], literature_source)
+                           if n not in numbers_unverified]
 
     if citations_invalid:
         logger.warning("Discussion RQ #%d có citation không tồn tại: %s", research_question_id, citations_invalid)

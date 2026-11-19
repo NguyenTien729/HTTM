@@ -35,3 +35,10 @@ def test_significance_thresholds_are_not_results():
     assert _find_unverified_numbers([text], source) == []
     # A threshold-looking number that is reported as a result is still checked.
     assert _find_unverified_numbers(["Hệ số bằng 0,001."], source) == ["0.001"]
+
+
+def test_literature_figures_are_checked_against_cited_evidence():
+    from app.routers.discussion import _english_thousands, _find_unverified_numbers
+    evidence = _english_thousands('{"quote": "among 34 countries with GDP above $10,000 the correlation was 0.51"}')
+    assert _find_unverified_numbers(["Với các nước có GDP trên 10.000 USD, tương quan là 0,51 [39]."], evidence) == []
+    assert _find_unverified_numbers(["Tương quan là 0,62 [39]."], evidence) == ["0.62"]

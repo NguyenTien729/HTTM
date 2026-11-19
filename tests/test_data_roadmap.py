@@ -292,3 +292,48 @@ async def test_research_plan_prompt_states_the_analysis_limits(snapshots, monkey
     monkeypatch.setattr(data, "probe_feasibility", probe)
     await pipeline.research_plan(wb_run())
     assert "không đặt giả thuyết phi tuyến" in prompts[0] and "không cần join_key" in prompts[0]
+
+
+async def test_collection_searches_again_until_required_variables_have_a_source(snapshots, monkeypatch):
+    """A required variable with no downloaded source triggers another search round,
+    and the last free slots are kept for it instead of extra sources for covered variables."""
+    calls = []
+
+    async def hub(context, **kwargs):
+        topic = context["project_topic"]
+        calls.append(topic)
+        if "Foreign direct investment" in topic:
+            # Only the refill round finds the FDI file.
+            if sum("Foreign direct investment" in c for c in calls) >= 2:
+                return {"datasets": [{"dataset_id": "owner/fdi", "title": "FDI", "source": "Hugging Face"}]}
+            return {"datasets": [{"dataset_id": "owner/fdi-broken", "title": "FDI", "source": "Hugging Face"}]}
+        if "GDP per capita" in topic:
+            return {"datasets": [{"dataset_id": f"owner/gdp{i}", "title": "GDP", "source": "Hugging Face"} for i in range(4)]}
+        return {"datasets": []}
+
+    async def no_wb(*args, **kwargs):
+        return []
+
+    async def no_queries(*args, **kwargs):
+        return {}
+
+    async def inspect(dataset_id):
+        return {"preview_selection": {"config": "default", "split": "train"}}
+
+    async def download(dataset_id, config, split, max_rows):
+        if dataset_id == "owner/fdi-broken":
+            raise ValueError("Tệp hỏng")
+        return pd.DataFrame({"country": ["VNM"], "year": [2019], "value": [1.0]}), {"rows": 1}
+
+    monkeypatch.setattr(data, "discover_gap_datasets", hub)
+    monkeypatch.setattr(data, "worldbank_candidates", no_wb)
+    monkeypatch.setattr(data, "_refine_missing_queries", no_queries)
+    monkeypatch.setattr(data, "inspect_dataset", inspect)
+    monkeypatch.setattr(data, "download_dataset_dataframe", download)
+    value = wb_run()
+    value["artifacts"]["settings"].update(max_sources=2, collection_seconds=60)
+    collection = await data.collect(value)
+    ids = [s["candidate"]["dataset_id"] for s in collection["sources"]]
+    assert "owner/fdi" in ids and len(ids) == 2
+    assert collection["uncovered_required"] == []
+    assert collection["refill_rounds"][0]["missing_need_keys"] == ["fdi"]

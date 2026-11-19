@@ -365,40 +365,60 @@ async def collect(run, progress=None):
             merge_results(extra_results, "supplemental")
 
     known_dataset_ids = set(previous_candidates)
-    ranked_all = sorted((candidate for candidate in candidates.values()
-                         if candidate.get("dataset_id") not in known_dataset_ids),
-                        key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
-                       -len(c.get("requirements", [])),
-                       -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
-                       c.get("dataset_id", "")))
-    # Give each required variable a chance to contribute a source before using
-    # the remaining inspection slots for duplicate/overlapping candidates.
-    ranked, seen_ids = [], set(known_dataset_ids)
-    priority_needs = sorted((need for need in needs if need.required),
-                            key=lambda n: (n.role != "outcome", n.role == "control", n.key))
-    for need in priority_needs:
-        match = next((candidate for candidate in ranked_all
-                      if need.key in candidate.get("requirements", [])
-                      and candidate["dataset_id"] not in seen_ids), None)
-        if match:
-            ranked.append(match)
-            seen_ids.add(match["dataset_id"])
-    ranked.extend(candidate for candidate in ranked_all if candidate["dataset_id"] not in seen_ids)
-    # Keep alternate candidates so a failed/unsupported first file does not
-    # consume the only opportunity to inspect that requirement.
-    ranked = ranked[:settings["max_sources"]*4]
-    counters["sources_total"] = len(sources) + len(ranked)
+    attempted_ids = set(known_dataset_ids)
+    required_keys = [need.key for need in needs if need.required]
+
+    def covered_keys():
+        return {key for source in sources if not source.get("candidate", {}).get("user_provided")
+                for key in source.get("candidate", {}).get("requirements", [])}
+
+    def uncovered_required():
+        covered = covered_keys()
+        return [key for key in required_keys if key not in covered]
+
+    def rank(pool):
+        ranked_all = sorted((candidate for candidate in pool if candidate.get("dataset_id") not in attempted_ids),
+                            key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
+                           -len(c.get("requirements", [])),
+                           -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
+                           c.get("dataset_id", "")))
+        # Give each still-missing required variable a source before using the
+        # remaining slots for duplicate/overlapping candidates.
+        ranked, seen_ids, missing = [], set(), set(uncovered_required())
+        priority_needs = sorted((need for need in needs if need.required and need.key in missing),
+                                key=lambda n: (n.role != "outcome", n.role == "control", n.key))
+        for need in priority_needs:
+            for candidate in [c for c in ranked_all if need.key in c.get("requirements", [])
+                              and c["dataset_id"] not in seen_ids][:2]:
+                ranked.append(candidate)
+                seen_ids.add(candidate["dataset_id"])
+        ranked.extend(candidate for candidate in ranked_all if candidate["dataset_id"] not in seen_ids)
+        # Keep alternates so one failed file does not consume the only chance for a variable.
+        return ranked[:settings["max_sources"]*4]
+
     download_slots = asyncio.Semaphore(2)
     existing_slots = [int(source.get("source_key", "s00")[1:]) for source in sources
                       if str(source.get("source_key", "")).startswith("s")
                       and str(source.get("source_key", ""))[1:].isdigit()]
     next_slot = max(existing_slots, default=0)
+    skipped = []
+
+    def public_count():
+        return len(sources) - len(user_sources)
+
     async def fetch(candidate):
         nonlocal next_slot
         async with download_slots:
-            if len(sources) - len(user_sources) >= settings["max_sources"] or loop.time() >= deadline:
+            if public_count() >= settings["max_sources"] or loop.time() >= deadline:
                 return
             dataset_id = candidate["dataset_id"]
+            missing = uncovered_required()
+            # Reserve the last slots for required variables that still have no source.
+            if missing and not set(candidate.get("requirements", [])) & set(missing) \
+                    and settings["max_sources"] - public_count() <= len(missing):
+                skipped.append(dataset_id)
+                return
+            attempted_ids.add(dataset_id)
             await report("download", "Đang kiểm tra và tải: " + dataset_id)
             try:
                 async def read():
@@ -419,7 +439,7 @@ async def collect(run, progress=None):
                 if frame.empty or metadata.get("analysis_mode") == "structure_only":
                     raise ValueError("Nguồn chưa có dữ liệu bảng để đo biến.")
                 # Reserve a stable slot before yielding to disk/Parquet work.
-                if len(sources) - len(user_sources) >= settings["max_sources"]:
+                if public_count() >= settings["max_sources"]:
                     return
                 next_slot += 1
                 key = f"s{next_slot:02d}"
@@ -439,8 +459,44 @@ async def collect(run, progress=None):
                 counters["sources_done"] += 1
                 await report("download", "Đã kiểm tra: " + dataset_id)
 
-    tasks = [asyncio.create_task(fetch(candidate)) for candidate in ranked]
-    await bounded(tasks, deadline-loop.time())
+    async def fetch_all(pool, seconds):
+        ranked = rank(pool)
+        counters["sources_total"] += len(ranked)
+        # Sequential priority order matters for coverage, so start them in order.
+        tasks = [asyncio.create_task(fetch(candidate)) for candidate in ranked]
+        await bounded(tasks, seconds)
+
+    counters["sources_total"] = len(sources)
+    await fetch_all(list(candidates.values()), deadline-loop.time()-(20. if required_keys else 0.))
+
+    # Go back and search again while a required variable has no downloaded source,
+    # instead of handing the design step a collection that cannot answer the question.
+    refill_rounds = []
+    for round_number in (1, 2):
+        missing = uncovered_required()
+        if not missing or public_count() >= settings["max_sources"] or deadline-loop.time() < 20:
+            break
+        missing_needs = [need for need in needs if need.key in missing]
+        await report("search", f"Tìm lại lần {round_number} cho biến còn thiếu: " + ", ".join(n.concept for n in missing_needs))
+        excluded_ids.extend(sorted(attempted_ids - set(excluded_ids)))
+        refill_guidance = {"missing_need_keys": missing,
+                           "previous_missing_requirements": guidance.get("previous_missing_requirements", []),
+                           "user_notes": guidance.get("user_notes", "")}
+        queries = await _refine_missing_queries(brief, refill_guidance, min(15., max(0., deadline-loop.time()-15.)*.2))
+        counters["searches_total"] += len(missing_needs)
+        before = set(candidates)
+        tasks = [asyncio.create_task(search(need, queries.get(need.key, []),
+                                            min(30, max(8, (deadline-loop.time()-12.)/max(1, len(missing_needs)))),
+                                            "refill"))
+                 for need in missing_needs]
+        merge_results(await bounded(tasks, max(0., (deadline-loop.time())*.5)), "refill")
+        fresh = [candidate for dataset_id, candidate in candidates.items()
+                 if dataset_id not in attempted_ids and set(candidate.get("requirements", [])) & set(missing)]
+        refill_rounds.append({"round": round_number, "missing_need_keys": missing,
+                              "new_candidates": len(set(candidates) - before), "tried": len(fresh)})
+        if not fresh:
+            continue
+        await fetch_all(fresh, deadline-loop.time())
     exhausted = timed_out or loop.time() >= deadline-.05
     await report("finished", "Hoàn tất thu thập" if not exhausted else "Đạt giới hạn thời gian; giữ các nguồn đã tải")
     search_coverage = [{"requirement": need.key, "concept": need.concept,
@@ -455,6 +511,7 @@ async def collect(run, progress=None):
                        for need in needs]
     return {"sources": sources, "searches": searches, "search_coverage": search_coverage,
             "rejected_previous_sources": rejected_previous_sources, "errors": errors,
+            "refill_rounds": refill_rounds, "uncovered_required": uncovered_required(),
             "search_guidance": {"round": guidance.get("round", 0), "targeted_need_keys": sorted(targeted_keys),
                                 "supplemental_queries": supplemental_queries,
                                 "excluded_previous_dataset_ids": excluded_ids},

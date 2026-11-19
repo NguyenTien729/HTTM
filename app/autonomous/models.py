@@ -16,9 +16,9 @@ class StartRun(StrictModel):
     project_id: int | None = Field(default=None, gt=0)
     region: str | None = Field(default=None, max_length=200)
     target_paper_count: int = Field(default=15, ge=3, le=50)
-    max_sources: int = Field(default=6, ge=1, le=10)
+    max_sources: int = Field(default=8, ge=1, le=10)
     max_rows: int = Field(default=10000, ge=100, le=50000)
-    collection_seconds: int = Field(default=180, ge=30, le=600)
+    collection_seconds: int = Field(default=240, ge=30, le=600)
     authors: list[PaperAuthor] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="after")

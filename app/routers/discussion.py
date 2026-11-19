@@ -144,8 +144,15 @@ _SIGNIFICANCE_THRESHOLD_RE = re.compile(
 
 
 def _english_thousands(text: str) -> str:
-    """Read source figures such as "$10,000" as 10000 (English thousands separator)."""
-    return re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+    """Read evidence figures as numbers: "$10,000" and "$10 000" → 10000, "0,47" → 0.47.
+
+    Paper findings are stored in English or Vietnamese notation; without this
+    a figure such as "0,47" is read as "0" and "47" and the quoting sentence
+    is reported as unverified although the cited paper reports it.
+    """
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+    text = re.sub(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))", "", text)
+    return _normalize_written_numbers(text)
 
 
 def _normalize_written_numbers(text: str) -> str:

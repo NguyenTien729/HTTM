@@ -42,3 +42,9 @@ def test_literature_figures_are_checked_against_cited_evidence():
     evidence = _english_thousands('{"quote": "among 34 countries with GDP above $10,000 the correlation was 0.51"}')
     assert _find_unverified_numbers(["Với các nước có GDP trên 10.000 USD, tương quan là 0,51 [39]."], evidence) == []
     assert _find_unverified_numbers(["Tương quan là 0,62 [39]."], evidence) == ["0.62"]
+
+
+def test_evidence_in_vietnamese_or_spaced_notation_is_read():
+    from app.routers.discussion import _english_thousands, _find_unverified_numbers
+    evidence = _english_thousands('{"key_finding": "34 nước có GDP trên $10 000, tương quan 0,47"}')
+    assert _find_unverified_numbers(["Ở 34 nước có GDP trên 10.000 USD, tương quan là 0,47 [39]."], evidence) == []

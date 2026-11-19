@@ -313,6 +313,38 @@ def repair_binding_variables(proposed, brief):
     return AnalysisDesign.model_validate(value)
 
 
+def repair_join_keys(proposed):
+    """Join on plan keys even when the design names the column ("country_iso3")
+    instead of the variable it was bound to ("country_code").
+
+    Joins compare converted frames, whose columns are plan keys, so a column
+    name there fails with "no common join key" although both sources have it.
+    """
+    value = proposed.model_dump()
+    by_column = {}
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            by_column.setdefault(binding["column"], set()).add(binding["variable"])
+    changed = []
+    for join in value.get("joins", []):
+        keys = []
+        for key in join["keys"]:
+            variables = by_column.get(key, set())
+            bound = {b["variable"] for s in value["sources"] for b in s["bindings"]}
+            if key not in bound and len(variables) == 1:
+                new_key = next(iter(variables))
+                changed.append(f"{key} → {new_key}")
+                keys.append(new_key)
+            else:
+                keys.append(key)
+        join["keys"] = list(dict.fromkeys(keys))
+    if not changed:
+        return proposed
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Khóa ghép được chuẩn hóa sang biến kế hoạch: " + "; ".join(dict.fromkeys(changed)) + "."]
+    return AnalysisDesign.model_validate(value)
+
+
 def drop_row_identifier_filters(proposed, collection):
     """Remove sample filters on row-number/ID columns (every value unique).
 
@@ -373,7 +405,7 @@ async def design(run):
             "Chỉ dùng transform identity/numeric/log/year/strip/casefold. log là logarit tự nhiên cho biến dương "
             "khi kế hoạch yêu cầu dạng log (ví dụ log GDP bình quân đầu người), với scale=1, offset=0. year chỉ cho cột ngày tháng, "
             "cột năm dạng số dùng numeric. Không ghép và không lọc mẫu theo số thứ tự dòng hay cột định danh (rownames, id, stt). "
-            "joins ghép lần lượt vào nguồn đầu tiên bằng các key chung. Chỉ one_to_one hoặc many_to_one, "
+            "joins ghép lần lượt vào nguồn đầu tiên bằng các key chung; keys trong joins là key join_key của kế hoạch (ví dụ country_code), không phải tên cột. Chỉ one_to_one hoặc many_to_one, "
             "không ghép nhiều-nhiều, không lặp biến ngoài khóa ghép. "
             "method chỉ descriptive/correlation/ols; nếu câu hỏi bắt buộc mô hình panel, time-series, spatial "
             "hoặc thiết kế nhân quả mà OLS không phù hợp, chọn unsupported và ghi missing_requirements. "
@@ -384,7 +416,7 @@ async def design(run):
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
     proposed = align_units(repair_binding_variables(proposed, brief), brief)
-    proposed = drop_row_identifier_filters(proposed, collection)
+    proposed = repair_join_keys(drop_row_identifier_filters(proposed, collection))
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,

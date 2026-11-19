@@ -461,3 +461,16 @@ def test_duplicate_binding_is_not_moved_to_the_next_closest_concept():
         binding("GDP bình quân đầu người (PPP)", "gdppc_ppp", "USD/người")]}])
     fixed = repair_binding_variables(proposed, brief)
     assert [b.variable for b in fixed.sources[0].bindings][2] == "GDP bình quân đầu người (PPP)"
+
+
+def test_join_keys_named_by_column_are_mapped_to_plan_keys():
+    from app.autonomous.pipeline import repair_join_keys
+    proposed = AnalysisDesign(adequate=True, rationale="x", method="ols", target="le", predictors=["gdp"], sources=[
+        {"source_key": "s01", "bindings": [binding("le", "SP.DYN.LE00.IN", "năm"),
+                                           binding("country_code", "country_iso3", "mã", transform="strip"),
+                                           binding("year", "year", "năm", transform="numeric")]},
+        {"source_key": "s04", "bindings": [binding("gdp", "NY.GDP.PCAP.CD", "USD"),
+                                           binding("country_code", "country_iso3", "mã", transform="strip"),
+                                           binding("year", "year", "năm", transform="numeric")]}],
+        joins=[{"right_source": "s04", "keys": ["country_iso3", "year"], "cardinality": "one_to_one"}])
+    assert repair_join_keys(proposed).joins[0].keys == ["country_code", "year"]

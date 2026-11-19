@@ -84,7 +84,7 @@ class Binding(StrictModel):
     column: str
     source_unit: str
     target_unit: str
-    transform: Literal["identity", "numeric", "year", "strip", "casefold"] = "identity"
+    transform: Literal["identity", "numeric", "log", "year", "strip", "casefold"] = "identity"
     scale: float = Field(default=1.0, allow_inf_nan=False)
     offset: float = Field(default=0.0, allow_inf_nan=False)
     rationale: str

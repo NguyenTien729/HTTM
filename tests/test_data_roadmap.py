@@ -337,3 +337,31 @@ async def test_collection_searches_again_until_required_variables_have_a_source(
     assert "owner/fdi" in ids and len(ids) == 2
     assert collection["uncovered_required"] == []
     assert collection["refill_rounds"][0]["missing_need_keys"] == ["fdi"]
+
+
+async def test_log_transform_gives_log_gdp_and_drops_non_positive_values(api, snapshots, monkeypatch):
+    import numpy as np
+    async def nothing(context, **kwargs):
+        return {"search": {}, "datasets": []}
+    monkeypatch.setattr(data, "discover_gap_datasets", nothing)
+    brief = country_brief()
+    brief["data_needs"][2]["unit"] = "log USD"
+    value = wb_run()
+    value["artifacts"]["research_plan"] = brief
+    collection = await data.collect(value)
+    by_id = {s["candidate"]["dataset_id"]: s for s in collection["sources"]}
+    gdp, fdi = by_id["worldbank:NY.GDP.PCAP.CD"], by_id["worldbank:BX.KLT.DINV.WD.GD.ZS"]
+    spec = AnalysisDesign(adequate=True, rationale="log GDP", sources=[
+        {"source_key": gdp["source_key"], "bindings": [binding("country", "country_iso3", "ISO3", transform="strip"),
+                                                        binding("year", "year", "year", transform="numeric"),
+                                                        binding("gdp_pc", "NY.GDP.PCAP.CD", "log USD", transform="log")]},
+        {"source_key": fdi["source_key"], "bindings": [binding("country", "country_iso3", "ISO3", transform="strip"),
+                                                        binding("year", "year", "year", transform="numeric"),
+                                                        binding("fdi", "BX.KLT.DINV.WD.GD.ZS", "% of GDP")]}],
+        joins=[{"right_source": fdi["source_key"], "keys": ["country", "year"], "cardinality": "one_to_one"}],
+        method="ols", target="gdp_pc", predictors=["fdi"]).model_dump()
+    spec["sources"][0]["bindings"][2]["source_unit"] = "current US$"
+    frame, report = data.prepare_data(1, brief, spec, collection, 1000)
+    raw = data.load_snapshot(1, gdp)
+    assert np.isclose(frame["gdp_pc"].max(), np.log(raw["NY.GDP.PCAP.CD"].max()))
+    assert frame["gdp_pc"].between(6, 9).all()

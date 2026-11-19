@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -418,6 +419,14 @@ async def collect(run, progress=None):
                     and settings["max_sources"] - public_count() <= len(missing):
                 skipped.append(dataset_id)
                 return
+            # At most three sources per variable, so other variables (controls) get slots too.
+            per_key = {}
+            for source in sources:
+                for key in source.get("candidate", {}).get("requirements", []):
+                    per_key[key] = per_key.get(key, 0) + 1
+            if candidate.get("requirements") and all(per_key.get(key, 0) >= 3 for key in candidate["requirements"]):
+                skipped.append(dataset_id)
+                return
             attempted_ids.add(dataset_id)
             await report("download", "Đang kiểm tra và tải: " + dataset_id)
             try:
@@ -572,6 +581,15 @@ def prepare_data(run_id, brief, design, collection, max_rows, drop_optional_pred
                 if (values.notna() & numeric.isna()).any():
                     raise ValueError("Chuyển kiểu số làm mất dữ liệu; cần điều chỉnh ánh xạ.")
                 values = numeric
+            elif binding.transform == "log":
+                # Natural log of a positive quantity (e.g. log GDP per capita). Zero or
+                # negative values have no log and become missing, never silently shifted.
+                if binding.scale != 1 or binding.offset != 0:
+                    raise ValueError("Biến đổi log không kết hợp với đổi đơn vị; hãy đổi đơn vị ở nguồn trước.")
+                numeric = pd.to_numeric(values, errors="coerce")
+                if (values.notna() & numeric.isna()).any():
+                    raise ValueError("Chuyển kiểu số làm mất dữ liệu; cần điều chỉnh ánh xạ.")
+                values = np.log(numeric.where(numeric > 0))
             elif binding.transform == "year":
                 if pd.api.types.is_numeric_dtype(values):
                     raise ValueError("Cột năm dạng số không được giải mã như timestamp.")
@@ -587,7 +605,7 @@ def prepare_data(run_id, brief, design, collection, max_rows, drop_optional_pred
                 if not pd.api.types.is_numeric_dtype(values):
                     raise ValueError("Chỉ đổi đơn vị trên cột số.")
                 values = values * binding.scale + binding.offset
-            elif binding.source_unit != binding.target_unit and binding.transform != "year":
+            elif binding.source_unit != binding.target_unit and binding.transform not in ("year", "log"):
                 raise ValueError("Đổi đơn vị phải khai báo hệ số chuyển đổi.")
             converted[binding.variable] = values
         frames[key] = converted
@@ -677,7 +695,6 @@ def prepare_data(run_id, brief, design, collection, max_rows, drop_optional_pred
     if design.method in ("ols", "correlation") and any(complete[c].nunique() < 2 for c in subset):
         raise ValueError("Biến phân tích không có biến thiên.")
     if design.method == "ols":
-        import numpy as np
         matrix = np.column_stack([np.ones(len(complete)), complete[predictors].to_numpy(dtype=float)])
         if np.linalg.matrix_rank(matrix) < matrix.shape[1]:
             raise ValueError("Các biến giải thích phụ thuộc tuyến tính; cần điều chỉnh mô hình.")

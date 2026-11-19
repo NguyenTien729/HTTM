@@ -441,3 +441,23 @@ def test_filters_on_row_identifier_columns_are_dropped():
     fixed = drop_row_identifier_filters(proposed, collection)
     assert [f.column for f in fixed.sources[0].filters] == ["region"]
     assert any("rownames" in item for item in fixed.assumptions)
+
+
+def test_duplicate_binding_is_not_moved_to_the_next_closest_concept():
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.pipeline import repair_binding_variables
+    brief = ResearchBrief(
+        question="GDP bình quân đầu người liên hệ thế nào với tuổi thọ năm 2019?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "le", "role": "dependent", "description": "Tuổi thọ"}], geography="Thế giới", time_scope="2019",
+        data_needs=[{"key": "life_expectancy", "concept": "Tuổi thọ trung bình", "role": "outcome", "unit": "năm",
+                     "resolution": "quốc gia", "search_terms": ["life"]},
+                    {"key": "gdp_per_capita", "concept": "GDP bình quân đầu người", "role": "exposure", "unit": "USD/người",
+                     "resolution": "quốc gia", "search_terms": ["gdp"]},
+                    {"key": "co2_per_capita", "concept": "Phát thải CO2 bình quân đầu người", "role": "control", "unit": "tấn/người",
+                     "resolution": "quốc gia", "required": False, "search_terms": ["co2"]}],
+        feasibility_notes="Kiểm thử.")
+    proposed = AnalysisDesign(adequate=True, rationale="x", method="ols", sources=[{"source_key": "s01", "bindings": [
+        binding("life_expectancy", "le", "năm"), binding("gdp_per_capita", "gdppc_ppp", "USD/người"),
+        binding("GDP bình quân đầu người (PPP)", "gdppc_ppp", "USD/người")]}])
+    fixed = repair_binding_variables(proposed, brief)
+    assert [b.variable for b in fixed.sources[0].bindings][2] == "GDP bình quân đầu người (PPP)"

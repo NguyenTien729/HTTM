@@ -278,15 +278,15 @@ def repair_binding_variables(proposed, brief):
                 words = _words(binding["variable"]) | _words(binding["column"])
                 scored = []
                 for need in needs:
-                    if need.key in taken:
-                        continue
                     score = len(words & _words(need.concept))
                     if score and _words(need.unit) and _words(need.unit) <= (_words(binding.get("target_unit")) | words):
                         score += 1
                     scored.append((score, need.key))
                 scored.sort(reverse=True)
                 best = [key for score, key in scored if scored and score == scored[0][0] and score > 0]
-                match = best if len(best) == 1 else []
+                # If the closest concept is already bound, this binding duplicates it:
+                # never fall back to the next-closest (e.g. GDP → CO2 per capita).
+                match = best if len(best) == 1 and best[0] not in taken else []
             if len(match) == 1 and match[0] not in taken:
                 changed.append(f"{binding['column']} → {match[0]}")
                 binding["variable"] = match[0]

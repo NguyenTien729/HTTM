@@ -233,3 +233,16 @@ def test_geography_filter_cannot_silently_use_other_records(collection):
                                      "rationale": "Chọn địa bàn"}]
     with pytest.raises(ValueError, match="Không có bản ghi"):
         data.prepare_data(1, brief(), spec, collection, 100)
+
+
+@pytest.mark.parametrize("restart,kept,dropped", [
+    ("verification", {"manuscript", "discussion", "analysis", "claim_evidence_map"}, {"verification"}),
+    ("manuscript", {"discussion", "introduction", "analysis", "paper_story"}, {"manuscript", "verification", "claim_evidence_map"}),
+])
+def test_final_gate_can_rerun_only_verification_or_only_the_manuscript(restart, kept, dropped):
+    value = run("awaiting_final_approval", "verification")
+    value["artifacts"].update({key: {"x": 1} for key in (
+        "introduction", "related_work", "discussion", "manuscript", "claim_evidence_map", "paper_story", "paper_state")})
+    revised = decide(value, Decision(expected_version=5, action="revise", notes="Kiểm chứng lại", restart_from=restart))
+    assert revised["stage"] == restart and revised["status"] == "queued"
+    assert kept <= set(revised["artifacts"]) and not dropped & set(revised["artifacts"])

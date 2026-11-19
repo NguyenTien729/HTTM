@@ -90,7 +90,8 @@ def decide(run, request):
                    "awaiting_final_approval": "introduction"}[status]
         allowed = {"awaiting_research_approval": {"research_plan"},
                    "awaiting_design_approval": {"research_plan", "data_collection", "design"},
-                   "awaiting_final_approval": {"research_plan", "data_collection", "design", "introduction"}}
+                   "awaiting_final_approval": {"research_plan", "data_collection", "design", "introduction",
+                                               "manuscript", "verification"}}
         if request.restart_from:
             if request.restart_from not in allowed[status]:
                 raise HTTPException(409, "Không thể bắt đầu lại từ bước đã chọn.")
@@ -143,10 +144,16 @@ def decide(run, request):
             keep.add("data_collection")
         if search_guidance is not None:
             keep.add("data_search_guidance")
-        if restart in ("design", "introduction"):
+        if restart in ("design", "introduction", "manuscript", "verification"):
             keep |= {"data_collection"}
-        if restart == "introduction":
+        if restart in ("introduction", "manuscript", "verification"):
             keep |= {"data_collection", "design", "design_validation", "analysis", "research_question_id"}
+        # Cheaper final-gate revisions: re-assemble the draft from the written
+        # sections, or only re-run verification after a checker fix.
+        if restart in ("manuscript", "verification"):
+            keep |= {"introduction", "related_work", "discussion", "paper_story", "paper_state"}
+        if restart == "verification":
+            keep |= {"manuscript", "claim_evidence_map"}
         artifacts = {k: v for k, v in artifacts.items() if k in keep}
         if search_guidance is not None:
             artifacts["data_search_guidance"] = search_guidance

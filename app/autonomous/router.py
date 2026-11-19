@@ -279,23 +279,29 @@ async def export_pdf(run_id: int):
 
 
 @router.get("/runs/{run_id}/export-draft.pdf", summary="PDF bản nháp có ghi rõ chưa phê duyệt")
-async def export_draft_pdf(run_id: int):
-    """A clearly labelled draft PDF of the current manuscript, before final approval."""
+async def export_draft_pdf(run_id: int, clean: bool = False):
+    """A draft PDF of the current manuscript, before final approval.
+
+    By default it is labelled as an unapproved draft. ``clean=true`` builds the
+    same layout as the approved PDF, without the label, for presenting work in
+    progress; the verification record is unchanged and still lists any errors.
+    """
     from app.routers.export import _build_paper_pdf
     run = await store.get(run_id)
     a = run["artifacts"]
     if not a.get("manuscript"):
         raise HTTPException(409, "Chưa có bản thảo.")
-    notice = _draft_notice(run)
-    path = ROOT / str(run_id) / f"draft_v{run['version']}.pdf"
+    notice = None if clean else _draft_notice(run)
+    path = ROOT / str(run_id) / f"draft_v{run['version']}{'_clean' if clean else ''}.pdf"
     path.parent.mkdir(parents=True, exist_ok=True)
     if a.get("settings", {}).get("paper_type") == "review":
         from app.services.review_export import build_review_pdf
         from app.routers.export import PaperExportOptions
         document = dict(a["review_document"])
-        document["title"] = "BẢN NHÁP CHƯA DUYỆT – " + str(document.get("title", ""))
+        if notice:
+            document["title"] = "BẢN NHÁP CHƯA DUYỆT – " + str(document.get("title", ""))
         sections = [dict(section) for section in document.get("sections", [])]
-        if sections:
+        if sections and notice:
             sections[0] = dict(sections[0], paragraphs=[{"text": notice, "evidence": []}] + list(sections[0].get("paragraphs", [])))
         document["sections"] = sections
         await asyncio.to_thread(build_review_pdf, document, path, PaperExportOptions(authors=a["settings"].get("authors", [])))
@@ -304,7 +310,8 @@ async def export_draft_pdf(run_id: int):
         if missing:
             raise HTTPException(409, "Bản thảo chưa đủ phần để dựng PDF: " + ", ".join(missing))
         await asyncio.to_thread(_build_paper_pdf, _empirical_pdf_data(a, notice), path)
-    return FileResponse(path, media_type="application/pdf", filename=f"research_run_{run_id}_ban_nhap.pdf")
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"research_run_{run_id}{'' if clean else '_ban_nhap'}.pdf")
 
 
 async def export_review_file(run, format):

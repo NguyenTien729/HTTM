@@ -54,3 +54,13 @@ async def test_draft_pdf_needs_a_manuscript(client):
     state["run"]["artifacts"].pop("manuscript")
     async with http:
         assert (await http.get("/autonomous/runs/7/export-draft.pdf")).status_code == 409
+
+
+async def test_clean_draft_pdf_has_the_approved_layout_without_the_label(client):
+    http, state = client
+    async with http:
+        clean = await http.get("/autonomous/runs/7/export-draft.pdf?clean=true")
+        assert clean.status_code == 200
+        assert 'research_run_7.pdf' in clean.headers["content-disposition"]
+    text = " ".join(" ".join(page.get_text() for page in fitz.open(stream=clean.content, filetype="pdf")).split())
+    assert "BẢN NHÁP" not in text and "Học vấn và tiền lương" in text

@@ -402,3 +402,29 @@ async def test_design_accepts_same_unit_written_differently_but_not_undeclared_c
     proposal["bindings"][0]["target_unit"] = "USD/hour"
     await pipeline.design(value)
     assert value["artifacts"]["design_validation"]["ok"] is False
+
+
+def test_design_bindings_that_name_columns_are_mapped_to_plan_keys():
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.pipeline import repair_binding_variables
+    brief = ResearchBrief(
+        question="Kinh nghiệm và tuổi liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": "hourly_wage", "concept": "Tiền lương theo giờ", "role": "outcome", "unit": "USD/giờ",
+                     "resolution": "cấp cá nhân", "search_terms": ["wage"]},
+                    {"key": "work_experience", "concept": "Số năm kinh nghiệm làm việc", "role": "exposure", "unit": "năm",
+                     "resolution": "cấp cá nhân", "search_terms": ["experience"]},
+                    {"key": "age", "concept": "Tuổi của người lao động", "role": "exposure", "unit": "năm",
+                     "resolution": "cấp cá nhân", "required": False, "search_terms": ["age"]}],
+        feasibility_notes="Một nguồn cá nhân.")
+    proposed = AnalysisDesign(adequate=True, rationale="Một nguồn", sources=[{"source_key": "s01", "bindings": [
+        binding("Lương giờ (USD)", "Lương giờ (USD)", "USD/giờ"), binding("Kinh nghiệm (năm)", "Kinh nghiệm (năm)", "năm"),
+        binding("Tuổi", "Tuổi", "năm")]}], method="ols", target="Lương giờ (USD)",
+        predictors=["Kinh nghiệm (năm)", "Tuổi"])
+    fixed = repair_binding_variables(proposed, brief)
+    assert [b.variable for b in fixed.sources[0].bindings] == ["hourly_wage", "work_experience", "age"]
+    assert fixed.target == "hourly_wage" and fixed.predictors == ["work_experience", "age"]
+    # A column that matches no planned concept stays unmapped and is still reported as invalid.
+    odd = AnalysisDesign(adequate=True, rationale="x", sources=[{"source_key": "s01", "bindings": [
+        binding("hourly_wage", "Lương giờ (USD)", "USD/giờ"), binding("union", "union", "group")]}], method="ols")
+    assert [b.variable for b in repair_binding_variables(odd, brief).sources[0].bindings] == ["hourly_wage", "union"]

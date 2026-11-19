@@ -245,6 +245,70 @@ def align_units(proposed, brief):
     return AnalysisDesign.model_validate(value)
 
 
+def _words(text):
+    import re
+    import unicodedata
+    text = unicodedata.normalize("NFC", str(text or "")).casefold()
+    return {w for w in re.findall(r"\w+", text) if len(w) > 1 or w.isdigit()}
+
+
+def repair_binding_variables(proposed, brief):
+    """Map bindings that name a column or concept instead of a plan key.
+
+    The design LLM sometimes writes the column label ("Lương giờ (USD)") in
+    ``variable`` instead of the plan key ("hourly_wage"). Exact key, concept
+    and column matches are repaired first; otherwise the need whose concept
+    shares the most words with the column (and the same unit) is used, but
+    only when that choice is unique, so an unclear binding stays invalid.
+    """
+    needs = list(brief.data_needs)
+    keys = {need.key for need in needs}
+    value = proposed.model_dump()
+    taken = {b["variable"] for s in value["sources"] for b in s["bindings"] if b["variable"] in keys}
+    changed = []
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            if binding["variable"] in keys:
+                continue
+            label = binding["variable"].casefold().strip()
+            match = [n.key for n in needs if label in (n.key.casefold(), n.concept.casefold().strip())]
+            if len(match) != 1:
+                words = _words(binding["variable"]) | _words(binding["column"])
+                scored = []
+                for need in needs:
+                    if need.key in taken:
+                        continue
+                    score = len(words & _words(need.concept))
+                    if score and _words(need.unit) and _words(need.unit) <= (_words(binding.get("target_unit")) | words):
+                        score += 1
+                    scored.append((score, need.key))
+                scored.sort(reverse=True)
+                best = [key for score, key in scored if scored and score == scored[0][0] and score > 0]
+                match = best if len(best) == 1 else []
+            if len(match) == 1 and match[0] not in taken:
+                changed.append(f"{binding['column']} → {match[0]}")
+                binding["variable"] = match[0]
+                taken.add(match[0])
+    if not changed:
+        return proposed
+    rename = {}
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            rename[binding["column"]] = binding["variable"]
+    for old, new in [item.split(" → ") for item in changed]:
+        rename[old] = new
+    role = {need.key: need.role for need in needs}
+    value["predictors"] = list(dict.fromkeys(
+        rename.get(p, p) for p in value.get("predictors", []) if rename.get(p, p) in keys)) or list(dict.fromkeys(
+        b["variable"] for s in value["sources"] for b in s["bindings"]
+        if role.get(b["variable"]) not in (None, "outcome", "join_key")))
+    if value.get("target") not in keys:
+        value["target"] = rename.get(value.get("target"), value.get("target"))
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Ánh xạ cột sang biến kế hoạch được chuẩn hóa: " + "; ".join(changed) + "."]
+    return AnalysisDesign.model_validate(value)
+
+
 async def design(run):
     approved(run, "research_plan")
     collection = run["artifacts"]["data_collection"]
@@ -266,7 +330,8 @@ async def design(run):
             "dùng strip/casefold khi làm khóa ghép, không coi là đại lượng. Nếu dữ liệu giả lập, "
             "instruction tuning hoặc ảnh không có biến định lượng phù hợp thì adequate=false. "
             "Đọc ý nghĩa và giá trị mẫu để phân biệt mã số với đại lượng. "
-            "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs. "
+            "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs: trường variable PHẢI là "
+            "đúng một key trong data_needs (ví dụ hourly_wage), không phải tên cột hay tên khái niệm; target và predictors cũng dùng key. "
             "Nếu nguồn chứa nhiều địa bàn hoặc thời kỳ, khai báo filters trước ánh xạ bằng cột gốc, "
             "operator eq/in/between và values chính xác có trong nguồn, kèm rationale. Không đoán mã quốc gia. "
             "Không có cách lọc đúng địa bàn/thời kỳ thì adequate=false. "
@@ -283,7 +348,7 @@ async def design(run):
             + json.dumps(brief.model_dump(), ensure_ascii=False) + "\n"
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
-    proposed = align_units(proposed, brief)
+    proposed = align_units(repair_binding_variables(proposed, brief), brief)
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,

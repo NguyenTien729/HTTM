@@ -58,7 +58,8 @@ def test_gap_context_and_hc3_are_preserved():
     gap = {"gap_id": 9, "description": "Example gap"}
     result = analyze_dataframe(frame, {"research_gap": gap}, target_column="y", predictor_columns=["x"])
     assert result["analysis_plan"]["research_gap"] == gap
-    assert result["ols_regression"]["coefficients"][1]["hc3_std_error"] > 0
+    assert result["ols_regression"]["robustness_hc3"][1]["hc3_std_error"] > 0
+    assert "hc3_ci_95" not in result["ols_regression"]["coefficients"][1]
 
 
 def test_download_honors_requested_rows_above_old_5000_cap(monkeypatch):

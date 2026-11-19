@@ -139,12 +139,18 @@ def enrich_analysis(result, frame, roles, quality, correlation_cols, group, targ
         covariance = inverse @ (design.T @ ((adjusted**2)[:, None]*design)) @ inverse
         se = np.sqrt(np.maximum(np.diag(covariance), 0))
         critical = stats.t.ppf(.975, len(work)-design.shape[1])
-        for row, estimate, error in zip(regression["coefficients"], beta, se):
-            row["hc3_std_error"] = float(error)
-            row["hc3_ci_95"] = [float(estimate-critical*error), float(estimate+critical*error)]
+        # HC3 is a robustness check kept apart from the coefficient rows, so every
+        # section of the paper quotes the same (OLS) standard errors, p-values and
+        # confidence intervals that the results table prints.
+        regression["robustness_hc3"] = [
+            {"term": row["term"], "hc3_std_error": float(error),
+             "hc3_ci_95": [float(estimate-critical*error), float(estimate+critical*error)]}
+            for row, estimate, error in zip(regression["coefficients"], beta, se)]
         regression["diagnostics"] = {"condition_number": float(np.linalg.cond(design)),
             "max_leverage": float(leverage.max()), "residual_mean": float(residuals.mean())}
-        regression["inference_note"] = "Hệ số có thêm sai số chuẩn HC3; p-value gốc dùng sai số chuẩn OLS thông thường. Cần kiểm tra độc lập quan sát và cấu trúc mô hình."
+        regression["inference_note"] = ("Mọi sai số chuẩn, p-value và khoảng tin cậy 95% trong bài dùng sai số chuẩn OLS thông thường "
+            "(std_error, p_value, ci_95_lower, ci_95_upper), khớp bảng kết quả. robustness_hc3 chỉ là kiểm tra độ vững: "
+            "nếu nhắc tới phải ghi rõ là HC3 và không thay cho khoảng tin cậy chính. Cần kiểm tra độc lập quan sát và cấu trúc mô hình.")
     gap = result["dataset"].get("research_gap")
     result["analysis_plan"] = {"research_gap": gap, "target": target, "group": group,
         "predictors": (regression or {}).get("predictors", []),

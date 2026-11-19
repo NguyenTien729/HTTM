@@ -135,6 +135,14 @@ _CONFIDENCE_LEVEL_RE = re.compile(
     re.IGNORECASE)
 
 
+# Significance thresholds ("p < 0,001", "α = 0.05", "mức ý nghĩa 5%") are reporting
+# conventions, not results, so they are never looked up in the analysis.
+_SIGNIFICANCE_THRESHOLD_RE = re.compile(
+    r"(?:\bp(?:[-\s]?value)?\s*(?:<|≤|<=|>|≥|>=)\s*0?\.(?:1|05|01|001|0001)(?!\d))"
+    r"|(?:(?:α|alpha|mức\s+ý\s+nghĩa(?:\s+thống\s+kê)?)\s*(?:=|là|bằng)?\s*(?:0?\.(?:1|05|01|001)(?!\d)|(?:10|5|1)\s*%))",
+    re.IGNORECASE)
+
+
 def _normalize_written_numbers(text: str) -> str:
     """Vietnamese prose writes 0,3819 and 1.671,77; read them as 0.3819 and 1671.77.
 
@@ -157,6 +165,7 @@ def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]
         cleaned = _normalize_written_numbers(_CITATION_RE.sub(" ", text))
         # Confidence levels ("khoảng tin cậy 95%", "95% CI") are method constants, not results.
         cleaned = _CONFIDENCE_LEVEL_RE.sub(" ", cleaned)
+        cleaned = _SIGNIFICANCE_THRESHOLD_RE.sub(" ", cleaned)
         for token in _numbers_in(cleaned):
             has_decimal = "." in token
             value = float(token)

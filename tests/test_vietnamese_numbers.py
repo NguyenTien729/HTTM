@@ -26,3 +26,12 @@ def test_confidence_levels_are_method_constants_not_results():
     source = '{"b": 0.92596, "lo": 0.75149, "hi": 1.10043}'
     assert _find_unverified_numbers([text], source) == []
     assert _find_unverified_numbers(["Có 95% người lao động thuộc nhóm này."], source) == ["95"]
+
+
+def test_significance_thresholds_are_not_results():
+    from app.routers.discussion import _find_unverified_numbers
+    source = '{"p_value": 1.2e-20, "coefficient": 0.9263}'
+    text = "Hệ số 0,926 có ý nghĩa thống kê (p < 0,001; mức ý nghĩa 5%, α = 0.05)."
+    assert _find_unverified_numbers([text], source) == []
+    # A threshold-looking number that is reported as a result is still checked.
+    assert _find_unverified_numbers(["Hệ số bằng 0,001."], source) == ["0.001"]

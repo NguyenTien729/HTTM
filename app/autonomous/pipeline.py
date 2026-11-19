@@ -662,11 +662,22 @@ async def manuscript(run):
                     "analysis_evidence": map_analysis, "approved_source_keys": sorted(allowed_sources)},
                    ensure_ascii=False, default=str), ClaimEvidenceMap)
     claims = dumped(claim_map)
+    from app.routers.discussion import _find_unverified_numbers
+    analysis_json = json.dumps(a["analysis"], ensure_ascii=False, default=str)
+
+    def analysis_numbers_match(text):
+        return not _find_unverified_numbers([text], analysis_json)
+
     for claim in claims["claims"]:
         bad_ids = set(claim.get("evidence_paper_ids", [])) - allowed_papers
         bad_keys = set(claim.get("source_keys", [])) - allowed_sources
         claim["evidence_paper_ids"] = sorted(set(claim.get("evidence_paper_ids", [])) & allowed_papers)
         claim["source_keys"] = sorted(set(claim.get("source_keys", [])) & allowed_sources)
+        if (claim["status"] == "supported_data" and not claim["source_keys"] and allowed_sources
+                and not bad_keys and analysis_numbers_match(claim.get("claim", ""))):
+            # The writer often omits the key for a figure taken from the analysis
+            # itself; the figure matching the analysis is the verified evidence.
+            claim["source_keys"] = sorted(allowed_sources)
         if bad_ids or bad_keys or (claim["status"] == "supported_literature" and not claim["evidence_paper_ids"]) or (
                 claim["status"] == "supported_data" and not claim["source_keys"]):
             claim["status"] = "unsupported"

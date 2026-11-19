@@ -1452,7 +1452,7 @@ def analyze_dataframe(
         topic_context
         + origin_sentence
         + f"(config: `{metadata.get('config', 'unknown')}`, split: `{metadata.get('split', 'unknown')}`). "
-        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ snapshot Parquet đã duyệt (có SHA-256)' if metadata.get('data_origin') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
+        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ bản đã làm sạch của tệp do nhóm tải lên, lưu thành snapshot có SHA-256' if metadata.get('data_origin') == 'user_upload' else 'từ các snapshot nguồn đã duyệt (có SHA-256)' if metadata.get('data_origin') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
         f"{('Do split lớn hơn giới hạn xử lý, ' + str(metadata.get('sampling_method')) + ' được sử dụng. ') if metadata.get('sampled') else 'Toàn bộ các dòng trong split được đưa vào phân tích. '}"
         f"Các bước gồm thống kê mô tả, kiểm tra dữ liệu thiếu/trùng, phân phối tần suất của biến phân loại và tương quan trên các biến liên tục đã chọn: {', '.join(correlation_cols) or 'không chọn'}. "
         f"{('Kiểm định nhóm được thực hiện cho ' + str(group_column) + ' và ' + str(target_column) + '. ') if test_results and test_results.get('status') == 'ok' else ''}"

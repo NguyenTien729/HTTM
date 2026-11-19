@@ -428,3 +428,16 @@ def test_design_bindings_that_name_columns_are_mapped_to_plan_keys():
     odd = AnalysisDesign(adequate=True, rationale="x", sources=[{"source_key": "s01", "bindings": [
         binding("hourly_wage", "Lương giờ (USD)", "USD/giờ"), binding("union", "union", "group")]}], method="ols")
     assert [b.variable for b in repair_binding_variables(odd, brief).sources[0].bindings] == ["hourly_wage", "union"]
+
+
+def test_filters_on_row_identifier_columns_are_dropped():
+    from app.autonomous.pipeline import drop_row_identifier_filters
+    collection = {"sources": [{"source_key": "s01", "rows": 534, "columns": [
+        {"name": "rownames", "unique": 534}, {"name": "region", "unique": 2}, {"name": "wage", "unique": 238}]}]}
+    proposed = AnalysisDesign(adequate=True, rationale="x", method="ols", sources=[{"source_key": "s01",
+        "filters": [{"column": "rownames", "operator": "between", "values": [1, 534], "rationale": "giữ toàn bộ"},
+                    {"column": "region", "operator": "in", "values": ["south"], "rationale": "vùng"}],
+        "bindings": [binding("wage", "wage", "USD/giờ")]}])
+    fixed = drop_row_identifier_filters(proposed, collection)
+    assert [f.column for f in fixed.sources[0].filters] == ["region"]
+    assert any("rownames" in item for item in fixed.assumptions)

@@ -309,6 +309,34 @@ def repair_binding_variables(proposed, brief):
     return AnalysisDesign.model_validate(value)
 
 
+def drop_row_identifier_filters(proposed, collection):
+    """Remove sample filters on row-number/ID columns (every value unique).
+
+    Filtering "rownames between 1 and 534" looks harmless but silently drops
+    rows whose index is outside the range, so the paper reports 533 rows while
+    claiming the whole file was kept. Geography/time filters never need an ID.
+    """
+    profiles = {s["source_key"]: s for s in collection.get("sources", [])}
+    value = proposed.model_dump()
+    dropped = []
+    for selection in value["sources"]:
+        source = profiles.get(selection["source_key"]) or {}
+        rows = source.get("rows")
+        unique = {c["name"]: c.get("unique") for c in source.get("columns", [])}
+        keep = []
+        for rule in selection.get("filters", []):
+            if rows and unique.get(rule["column"]) == rows:
+                dropped.append(f"{selection['source_key']}:{rule['column']}")
+            else:
+                keep.append(rule)
+        selection["filters"] = keep
+    if not dropped:
+        return proposed
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Không lọc mẫu theo cột số thứ tự/định danh dòng (" + ", ".join(dropped) + "); giữ mọi dòng của nguồn."]
+    return AnalysisDesign.model_validate(value)
+
+
 async def design(run):
     approved(run, "research_plan")
     collection = run["artifacts"]["data_collection"]
@@ -337,7 +365,7 @@ async def design(run):
             "Không có cách lọc đúng địa bàn/thời kỳ thì adequate=false. "
             "Khai báo source_unit và target_unit trùng đơn vị trong kế hoạch; mọi đổi đơn vị phải có lý do, scale/offset rõ. "
             "Chỉ dùng transform identity/numeric/year/strip/casefold. year chỉ cho cột ngày tháng, "
-            "cột năm dạng số dùng numeric. Không ghép theo số thứ tự dòng. "
+            "cột năm dạng số dùng numeric. Không ghép và không lọc mẫu theo số thứ tự dòng hay cột định danh (rownames, id, stt). "
             "joins ghép lần lượt vào nguồn đầu tiên bằng các key chung. Chỉ one_to_one hoặc many_to_one, "
             "không ghép nhiều-nhiều, không lặp biến ngoài khóa ghép. "
             "method chỉ descriptive/correlation/ols; nếu câu hỏi bắt buộc mô hình panel, time-series, spatial "
@@ -349,6 +377,7 @@ async def design(run):
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
     proposed = align_units(repair_binding_variables(proposed, brief), brief)
+    proposed = drop_row_identifier_filters(proposed, collection)
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,

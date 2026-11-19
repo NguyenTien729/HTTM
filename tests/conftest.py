@@ -27,3 +27,14 @@ async def client():
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     await db.close_db()
+
+
+@pytest.fixture(autouse=True)
+def offline_world_bank(monkeypatch, tmp_path):
+    """Tests never reach the real World Bank API (CI has internet access)."""
+    from app.data_research import worldbank
+    async def offline(*args, **kwargs):
+        raise worldbank.WorldBankError("World Bank is offline in tests")
+    monkeypatch.setattr(worldbank, "_get_json", offline)
+    monkeypatch.setattr(worldbank, "CACHE_DIR", tmp_path / "wb-cache")
+    monkeypatch.setattr(worldbank, "_memory", {})

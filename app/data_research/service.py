@@ -1265,6 +1265,8 @@ def _regression_summary(frame: pd.DataFrame, target: str, predictors: list[str])
         "target": target,
         "predictors": numeric_predictors,
         "n": int(n),
+        "df_residual": int(df_resid),
+        "df_model": int(k),
         "r_squared": _safe_float(r_squared),
         "adjusted_r_squared": _safe_float(adjusted_r_squared),
         "f_statistic": _safe_float(f_stat),
@@ -1452,8 +1454,9 @@ def analyze_dataframe(
         topic_context
         + origin_sentence
         + f"(config: `{metadata.get('config', 'unknown')}`, split: `{metadata.get('split', 'unknown')}`). "
-        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ snapshot Parquet đã duyệt (có SHA-256)' if metadata.get('data_origin') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
-        f"{('Do split lớn hơn giới hạn xử lý, ' + str(metadata.get('sampling_method')) + ' được sử dụng. ') if metadata.get('sampled') else 'Toàn bộ các dòng trong split được đưa vào phân tích. '}"
+        f"Dữ liệu bảng được đọc {'từ file ' + str(metadata['filename']) if metadata.get('filename') else 'từ bản đã làm sạch của tệp do nhóm tải lên, lưu thành snapshot có SHA-256' if metadata.get('data_origin') == 'user_upload' else 'từ các snapshot nguồn đã duyệt (có SHA-256)' if metadata.get('data_origin') else 'từ split Parquet'}; phân tích thực hiện trên {actual_rows:,} dòng và {len(frame.columns)} biến. "
+        f"{('Do split lớn hơn giới hạn xử lý, ' + str(metadata.get('sampling_method')) + ' được sử dụng. ') if metadata.get('sampled') else 'Toàn bộ các dòng trong split được đưa vào bảng phân tích. '}"
+        f"{('Mỗi phép tính chỉ dùng các dòng đủ dữ liệu cho các biến của phép tính đó; mô hình OLS dùng ' + str(regression['n']) + ' dòng, loại ' + str(actual_rows - regression['n']) + ' dòng thiếu giá trị. ') if regression and regression.get('status') == 'ok' and regression.get('n') is not None and regression['n'] < actual_rows else ''}"
         f"Các bước gồm thống kê mô tả, kiểm tra dữ liệu thiếu/trùng, phân phối tần suất của biến phân loại và tương quan trên các biến liên tục đã chọn: {', '.join(correlation_cols) or 'không chọn'}. "
         f"{('Kiểm định nhóm được thực hiện cho ' + str(group_column) + ' và ' + str(target_column) + '. ') if test_results and test_results.get('status') == 'ok' else ''}"
         f"{('Mô hình OLS được ước lượng với biến phụ thuộc ' + str(target_column) + ' và biến giải thích ' + ', '.join(predictors) + '. ') if regression and regression.get('status') == 'ok' else ''}"
@@ -1491,14 +1494,26 @@ def analyze_dataframe(
             results_sentences.append("Kiểm định nhóm chưa thực hiện được: " + str(test_results.get("reason", "cần kiểm tra dữ liệu và giả định")) + ".")
     if regression:
         if regression.get("status") == "ok":
+            def vn(value):
+                if not isinstance(value, (int, float)):
+                    return "chưa tính được"
+                if value != 0 and abs(value) < 0.001:
+                    mantissa, exponent = f"{value:.3e}".split("e")
+                    return mantissa.replace(".", ",") + "×10^" + str(int(exponent))
+                return f"{value:.4f}".replace(".", ",")
+            coefficient_text = "; ".join(
+                f"{'hệ số chặn' if c['term'] == 'intercept' else c['term']} = {vn(c.get('coefficient'))} "
+                f"(sai số chuẩn {vn(c.get('std_error'))}, khoảng tin cậy 95% từ {vn(c.get('ci_95_lower'))} đến {vn(c.get('ci_95_upper'))}, p = {vn(c.get('p_value'))})"
+                for c in regression.get("coefficients", []))
             results_sentences.append(
-                f"Hồi quy OLS cho R²={regression.get('r_squared')}, adjusted R²={regression.get('adjusted_r_squared')}, "
-                f"p tổng thể={regression.get('model_p_value')}. Cần đọc hệ số và khoảng tin cậy trong bảng chi tiết."
+                f"Hồi quy OLS trên {regression.get('n')} quan sát cho R² = {vn(regression.get('r_squared'))}, "
+                f"R² hiệu chỉnh = {vn(regression.get('adjusted_r_squared'))}, p của mô hình = {vn(regression.get('model_p_value'))}. "
+                f"Các hệ số: {coefficient_text}."
             )
         else:
             results_sentences.append("Hồi quy OLS chưa thực hiện được: " + str(regression.get("reason")) + ".")
     results_sentences.append(
-        "Không nên diễn giải p-value như bằng chứng nhân quả; kết quả này là bản nháp sinh từ dữ liệu đã chọn, cần người nghiên cứu rà soát trước khi đưa vào bài báo."
+        "Các kết quả mô tả liên hệ quan sát trong dữ liệu đã chọn; p-value không được diễn giải như bằng chứng nhân quả."
     )
 
     result = {

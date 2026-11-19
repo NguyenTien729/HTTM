@@ -12,6 +12,7 @@ from app.data_research.service import (
     DataResearchError, _explicit_geography_conflict, _json_safe, discover_gap_datasets,
     download_dataset_dataframe, inspect_dataset,
 )
+from app.data_research import worldbank
 from .models import AnalysisDesign, ResearchBrief
 
 ROOT = Path(__file__).resolve().parents[2] / "artifacts" / "autonomous"
@@ -63,6 +64,111 @@ async def _refine_missing_queries(brief, guidance, timeout):
         if not queries.get(need.key):
             queries[need.key] = fallback_queries(need)
     return queries
+
+
+def need_search_context(need, brief, refinement=(), excluded_ids=()):
+    """Discovery context for one variable (shared by collection and the feasibility probe)."""
+    join_context = " ".join(dict.fromkeys(
+        [term for item in brief.data_needs if item.role == "join_key"
+         for term in [item.concept, *item.search_terms]]))
+    variable_terms = list(dict.fromkeys([need.concept] + need.search_terms))
+    context = {"project_topic": " ".join([need.concept, brief.geography, brief.time_scope]),
+               "description": " ".join([need.concept, need.unit, need.resolution]),
+               "_search_concept_groups": [variable_terms],
+               "_data_queries": list(dict.fromkeys([
+                   " ".join([need.concept, brief.geography, brief.time_scope, join_context]),
+                   *need.search_terms, need.concept, need.unit + " " + need.resolution,
+                   *refinement])),
+               "proposed_research_question": brief.question}
+    if excluded_ids:
+        context["_exclude_dataset_ids"] = list(excluded_ids)
+    if brief.geography_terms:
+        context["_search_scope_terms"] = brief.geography_terms
+    return context
+
+
+async def probe_feasibility(brief, user_sources=(), seconds=75.0):
+    """Quick metadata-only search per variable, shown at the research-approval gate.
+
+    It answers "is there any candidate source for each variable?" before the user
+    approves the question. Candidates are not downloaded or validated here; the
+    collection and design stages still check real columns, scope and units.
+    """
+    brief = ResearchBrief.model_validate(brief) if isinstance(brief, dict) else brief
+    needs = [need for need in brief.data_needs if need.role != "join_key"]
+    loop = asyncio.get_running_loop()
+    started, errors = loop.time(), []
+    per_need = max(8.0, min(25.0, seconds * 2 / max(1, len(needs))))
+    slots = asyncio.Semaphore(2)
+
+    async def one(need):
+        async with slots:
+            stable = await worldbank_candidates(need, brief, [], errors)
+            try:
+                hub = await asyncio.wait_for(discover_gap_datasets(
+                    need_search_context(need, brief), limit=3, max_search_seconds=per_need), timeout=per_need + 2)
+            except (DataResearchError, asyncio.TimeoutError) as exc:
+                errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
+                hub = {"datasets": []}
+            found = []
+            for candidate in [*stable, *hub.get("datasets", [])]:
+                if candidate.get("dataset_id") in {c["dataset_id"] for c in found}:
+                    continue
+                found.append({key: candidate.get(key) for key in (
+                    "dataset_id", "title", "source", "dataset_url", "scope_match", "relevance_note")})
+            return need, found
+
+    tasks = [asyncio.create_task(one(need)) for need in needs]
+    done, pending = await asyncio.wait(tasks, timeout=max(1.0, seconds)) if tasks else (set(), set())
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    results = {need.key: found for need, found in (task.result() for task in done if not task.exception())}
+    rows = [{"key": need.key, "concept": need.concept, "role": need.role, "unit": need.unit,
+             "resolution": need.resolution, "required": need.required,
+             "searched": need.key in results, "candidates": results.get(need.key, [])[:6],
+             "candidate_count": len(results.get(need.key, []))} for need in needs]
+    required = [row for row in rows if row["required"]]
+    missing = [row["concept"] for row in required if not row["candidate_count"]]
+    verdict = "likely" if not missing else "team_data" if user_sources else "at_risk"
+    return {"schema_version": "httm/data-feasibility-v1", "verdict": verdict, "needs": rows,
+            "required_total": len(required), "required_with_candidates": len(required) - len(missing),
+            "missing_required": missing, "user_sources": len(list(user_sources)),
+            "errors": errors[:20], "time_limit_reached": bool(pending),
+            "elapsed_seconds": round(loop.time() - started, 1),
+            "note": "Ứng viên chỉ dựa trên metadata và chưa được tải về; cột, địa bàn, thời gian và đơn vị "
+                    "sẽ được kiểm tra thật ở bước thu thập và thiết kế. Không tìm thấy ứng viên không chứng minh "
+                    "rằng dữ liệu không tồn tại."}
+
+
+def need_phrases(need, refinement=()):
+    """English search phrases for one variable, most specific first."""
+    return list(dict.fromkeys(p.strip() for p in [*need.search_terms, need.concept, *refinement] if p and p.strip()))
+
+
+_SUBNATIONAL = ("cá nhân", "ca nhan", "individual", "person", "respondent", "student", "sinh viên", "người",
+                "hộ", "household", "firm", "doanh nghiệp", "company", "tỉnh", "province", "district", "huyện",
+                "xã", "commune", "city", "thành phố", "county", "state-level", "trạm", "station", "school", "trường")
+
+
+def worldbank_resolution(resolution):
+    """World Bank WDI is country × year only: skip variables measured below country level."""
+    text = str(resolution or "").casefold()
+    return not any(marker in text for marker in _SUBNATIONAL)
+
+
+async def worldbank_candidates(need, brief, refinement, errors, excluded_ids=()):
+    """World Bank indicators for one variable; failures are logged, never fatal."""
+    if need.role == "join_key" or not worldbank_resolution(need.resolution):
+        return []
+    try:
+        found = await asyncio.wait_for(worldbank.search_indicators(
+            need_phrases(need, refinement), brief.geography, limit=3), timeout=40)
+    except (worldbank.WorldBankError, asyncio.TimeoutError) as exc:
+        errors.append({"requirement": need.key, "source": "World Bank",
+                       "error": str(exc) or "World Bank timeout"})
+        return []
+    return [candidate for candidate in found if candidate["dataset_id"] not in set(excluded_ids)]
 
 
 def snapshot_path(run_id, revision, source_key):
@@ -182,36 +288,26 @@ async def collect(run, progress=None):
     # The public dataset indexes rate-limit bursts; keep discovery parallelism
     # modest so broader query plans do not turn into a provider-wide 429 wave.
     search_slots = asyncio.Semaphore(2)
-    join_context = " ".join(dict.fromkeys(
-        [term for need in brief.data_needs if need.role == "join_key"
-         for term in [need.concept, *need.search_terms]]))
     async def search(need, refinement=None, search_seconds=24, wave="initial"):
         async with search_slots:
             refinement = refinement or []
             # Screen each dataset for the variable currently being sought. A
             # climate source must not be rejected merely because it lacks the
             # separate agricultural outcome that will be joined later.
-            variable_terms = list(dict.fromkeys([need.concept] + need.search_terms))
-            context = {"project_topic": " ".join([need.concept, brief.geography, brief.time_scope]),
-                       "description": " ".join([need.concept, need.unit, need.resolution]),
-                       "_search_concept_groups": [variable_terms],
-                       "_data_queries": list(dict.fromkeys([
-                           " ".join([need.concept, brief.geography, brief.time_scope, join_context]),
-                           *need.search_terms, need.concept, need.unit + " " + need.resolution,
-                           *refinement])),
-                       "proposed_research_question": brief.question}
-            if excluded_ids:
-                context["_exclude_dataset_ids"] = excluded_ids
-            if brief.geography_terms:
-                context["_search_scope_terms"] = brief.geography_terms
+            context = need_search_context(need, brief, refinement, excluded_ids)
             try:
-                result = await asyncio.wait_for(discover_gap_datasets(
-                    context, limit=5 if wave == "supplemental" else 4,
-                    max_search_seconds=search_seconds), timeout=search_seconds + 2)
+                try:
+                    result = await asyncio.wait_for(discover_gap_datasets(
+                        context, limit=5 if wave == "supplemental" else 4,
+                        max_search_seconds=search_seconds), timeout=search_seconds + 2)
+                except (DataResearchError, asyncio.TimeoutError) as exc:
+                    errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
+                    result = {"search": {}, "datasets": []}
+                # World Bank: a stable country × year source searched for every variable.
+                stable = await worldbank_candidates(need, brief, refinement, errors, excluded_ids)
+                result = dict(result, datasets=list(result.get("datasets", [])) + stable)
+                result["search"] = dict(result.get("search") or {}, world_bank_candidates=len(stable))
                 return need, result
-            except (DataResearchError, asyncio.TimeoutError) as exc:
-                errors.append({"requirement": need.key, "error": getattr(exc, "message", "Search timeout")})
-                return need, {"search": {}, "datasets": []}
             finally:
                 counters["searches_done"] += 1
                 await report("search", ("Lượt bổ sung: " if wave == "supplemental" else "Tìm theo biến: ") + need.concept)
@@ -269,43 +365,66 @@ async def collect(run, progress=None):
             merge_results(extra_results, "supplemental")
 
     known_dataset_ids = set(previous_candidates)
-    ranked_all = sorted((candidate for candidate in candidates.values()
-                         if candidate.get("dataset_id") not in known_dataset_ids),
-                        key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
-                       -len(c.get("requirements", [])),
-                       -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
-                       c.get("dataset_id", "")))
-    # Give each required variable a chance to contribute a source before using
-    # the remaining inspection slots for duplicate/overlapping candidates.
-    ranked, seen_ids = [], set(known_dataset_ids)
-    priority_needs = sorted((need for need in needs if need.required),
-                            key=lambda n: (n.role != "outcome", n.role == "control", n.key))
-    for need in priority_needs:
-        match = next((candidate for candidate in ranked_all
-                      if need.key in candidate.get("requirements", [])
-                      and candidate["dataset_id"] not in seen_ids), None)
-        if match:
-            ranked.append(match)
-            seen_ids.add(match["dataset_id"])
-    ranked.extend(candidate for candidate in ranked_all if candidate["dataset_id"] not in seen_ids)
-    # Keep alternate candidates so a failed/unsupported first file does not
-    # consume the only opportunity to inspect that requirement.
-    ranked = ranked[:settings["max_sources"]*4]
-    counters["sources_total"] = len(sources) + len(ranked)
+    attempted_ids = set(known_dataset_ids)
+    required_keys = [need.key for need in needs if need.required]
+
+    def covered_keys():
+        return {key for source in sources if not source.get("candidate", {}).get("user_provided")
+                for key in source.get("candidate", {}).get("requirements", [])}
+
+    def uncovered_required():
+        covered = covered_keys()
+        return [key for key in required_keys if key not in covered]
+
+    def rank(pool):
+        ranked_all = sorted((candidate for candidate in pool if candidate.get("dataset_id") not in attempted_ids),
+                            key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
+                           -len(c.get("requirements", [])),
+                           -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
+                           c.get("dataset_id", "")))
+        # Give each still-missing required variable a source before using the
+        # remaining slots for duplicate/overlapping candidates.
+        ranked, seen_ids, missing = [], set(), set(uncovered_required())
+        priority_needs = sorted((need for need in needs if need.required and need.key in missing),
+                                key=lambda n: (n.role != "outcome", n.role == "control", n.key))
+        for need in priority_needs:
+            for candidate in [c for c in ranked_all if need.key in c.get("requirements", [])
+                              and c["dataset_id"] not in seen_ids][:2]:
+                ranked.append(candidate)
+                seen_ids.add(candidate["dataset_id"])
+        ranked.extend(candidate for candidate in ranked_all if candidate["dataset_id"] not in seen_ids)
+        # Keep alternates so one failed file does not consume the only chance for a variable.
+        return ranked[:settings["max_sources"]*4]
+
     download_slots = asyncio.Semaphore(2)
     existing_slots = [int(source.get("source_key", "s00")[1:]) for source in sources
                       if str(source.get("source_key", "")).startswith("s")
                       and str(source.get("source_key", ""))[1:].isdigit()]
     next_slot = max(existing_slots, default=0)
+    skipped = []
+
+    def public_count():
+        return len(sources) - len(user_sources)
+
     async def fetch(candidate):
         nonlocal next_slot
         async with download_slots:
-            if len(sources) - len(user_sources) >= settings["max_sources"] or loop.time() >= deadline:
+            if public_count() >= settings["max_sources"] or loop.time() >= deadline:
                 return
             dataset_id = candidate["dataset_id"]
+            missing = uncovered_required()
+            # Reserve the last slots for required variables that still have no source.
+            if missing and not set(candidate.get("requirements", [])) & set(missing) \
+                    and settings["max_sources"] - public_count() <= len(missing):
+                skipped.append(dataset_id)
+                return
+            attempted_ids.add(dataset_id)
             await report("download", "Đang kiểm tra và tải: " + dataset_id)
             try:
                 async def read():
+                    if dataset_id.startswith(worldbank.DATASET_PREFIX):
+                        frame, meta = await worldbank.download_indicator(dataset_id, brief.time_scope, settings["max_rows"])
+                        return frame, meta, {"config": meta["config"], "split": meta["split"]}
                     if dataset_id.startswith("mendeley:"):
                         # Mendeley inspect already downloads the whole file. Read once.
                         frame, meta = await download_dataset_dataframe(dataset_id, None, "0", settings["max_rows"])
@@ -320,7 +439,7 @@ async def collect(run, progress=None):
                 if frame.empty or metadata.get("analysis_mode") == "structure_only":
                     raise ValueError("Nguồn chưa có dữ liệu bảng để đo biến.")
                 # Reserve a stable slot before yielding to disk/Parquet work.
-                if len(sources) - len(user_sources) >= settings["max_sources"]:
+                if public_count() >= settings["max_sources"]:
                     return
                 next_slot += 1
                 key = f"s{next_slot:02d}"
@@ -335,13 +454,49 @@ async def collect(run, progress=None):
                 counters["sources_saved"] += 1
             except Exception as exc:
                 errors.append({"dataset_id": dataset_id, "error": str(exc)
-                    if isinstance(exc, (DataResearchError, ValueError)) else type(exc).__name__})
+                    if isinstance(exc, (DataResearchError, ValueError, worldbank.WorldBankError)) else type(exc).__name__})
             finally:
                 counters["sources_done"] += 1
                 await report("download", "Đã kiểm tra: " + dataset_id)
 
-    tasks = [asyncio.create_task(fetch(candidate)) for candidate in ranked]
-    await bounded(tasks, deadline-loop.time())
+    async def fetch_all(pool, seconds):
+        ranked = rank(pool)
+        counters["sources_total"] += len(ranked)
+        # Sequential priority order matters for coverage, so start them in order.
+        tasks = [asyncio.create_task(fetch(candidate)) for candidate in ranked]
+        await bounded(tasks, seconds)
+
+    counters["sources_total"] = len(sources)
+    await fetch_all(list(candidates.values()), deadline-loop.time()-(20. if required_keys else 0.))
+
+    # Go back and search again while a required variable has no downloaded source,
+    # instead of handing the design step a collection that cannot answer the question.
+    refill_rounds = []
+    for round_number in (1, 2):
+        missing = uncovered_required()
+        if not missing or public_count() >= settings["max_sources"] or deadline-loop.time() < 20:
+            break
+        missing_needs = [need for need in needs if need.key in missing]
+        await report("search", f"Tìm lại lần {round_number} cho biến còn thiếu: " + ", ".join(n.concept for n in missing_needs))
+        excluded_ids.extend(sorted(attempted_ids - set(excluded_ids)))
+        refill_guidance = {"missing_need_keys": missing,
+                           "previous_missing_requirements": guidance.get("previous_missing_requirements", []),
+                           "user_notes": guidance.get("user_notes", "")}
+        queries = await _refine_missing_queries(brief, refill_guidance, min(15., max(0., deadline-loop.time()-15.)*.2))
+        counters["searches_total"] += len(missing_needs)
+        before = set(candidates)
+        tasks = [asyncio.create_task(search(need, queries.get(need.key, []),
+                                            min(30, max(8, (deadline-loop.time()-12.)/max(1, len(missing_needs)))),
+                                            "refill"))
+                 for need in missing_needs]
+        merge_results(await bounded(tasks, max(0., (deadline-loop.time())*.5)), "refill")
+        fresh = [candidate for dataset_id, candidate in candidates.items()
+                 if dataset_id not in attempted_ids and set(candidate.get("requirements", [])) & set(missing)]
+        refill_rounds.append({"round": round_number, "missing_need_keys": missing,
+                              "new_candidates": len(set(candidates) - before), "tried": len(fresh)})
+        if not fresh:
+            continue
+        await fetch_all(fresh, deadline-loop.time())
     exhausted = timed_out or loop.time() >= deadline-.05
     await report("finished", "Hoàn tất thu thập" if not exhausted else "Đạt giới hạn thời gian; giữ các nguồn đã tải")
     search_coverage = [{"requirement": need.key, "concept": need.concept,
@@ -356,6 +511,7 @@ async def collect(run, progress=None):
                        for need in needs]
     return {"sources": sources, "searches": searches, "search_coverage": search_coverage,
             "rejected_previous_sources": rejected_previous_sources, "errors": errors,
+            "refill_rounds": refill_rounds, "uncovered_required": uncovered_required(),
             "search_guidance": {"round": guidance.get("round", 0), "targeted_need_keys": sorted(targeted_keys),
                                 "supplemental_queries": supplemental_queries,
                                 "excluded_previous_dataset_ids": excluded_ids},
@@ -364,7 +520,7 @@ async def collect(run, progress=None):
             "note": "Snapshot có thể là mẫu giới hạn; cần đối chiếu phạm vi và biến trước khi phân tích."}
 
 
-def prepare_data(run_id, brief, design, collection, max_rows):
+def prepare_data(run_id, brief, design, collection, max_rows, drop_optional_predictors=False):
     """Execute only declared transformations; never execute LLM-generated code."""
     brief = ResearchBrief.model_validate(brief)
     design = AnalysisDesign.model_validate(design)
@@ -472,7 +628,9 @@ def prepare_data(run_id, brief, design, collection, max_rows):
         raise ValueError("Có nguồn được chọn nhưng chưa khai báo cách kết hợp.")
     if len(frame) > max_rows:
         raise ValueError("Dữ liệu sau kết hợp vượt giới hạn dòng đã cấu hình.")
-    required = {n.key for n in brief.data_needs if n.required}
+    # Join keys only matter when sources are joined: a single source needs none.
+    required = {n.key for n in brief.data_needs if n.required
+                and not (n.role == "join_key" and len(design.sources) == 1)}
     if required - set(frame):
         raise ValueError("Thiếu biến bắt buộc: " + ", ".join(sorted(required-set(frame))))
     year_need = next((n for n in brief.data_needs if n.role == "join_key" and n.key == "year"), None)
@@ -494,25 +652,37 @@ def prepare_data(run_id, brief, design, collection, max_rows):
         raise ValueError("Hiện chỉ hỗ trợ biến kết quả dạng số.")
     if len(set(design.predictors)) != len(design.predictors):
         raise ValueError("Biến giải thích bị lặp.")
+    predictors, dropped = [], []
     for predictor in design.predictors:
-        if predictor not in frame or predictor == design.target or needs[predictor].role == "join_key":
-            raise ValueError("Biến giải thích không hợp lệ.")
-        if not pd.api.types.is_numeric_dtype(frame[predictor]):
-            raise ValueError("Biến giải thích phải là cột số.")
-    if design.method in ("ols", "correlation") and not design.predictors:
-        raise ValueError("Phương pháp cần có biến giải thích.")
-    subset = [design.target] + design.predictors
+        problem = None
+        if predictor not in frame or predictor == design.target or predictor not in needs \
+                or needs[predictor].role == "join_key":
+            problem = f"Biến giải thích '{predictor}' không hợp lệ hoặc chưa được ánh xạ tới cột."
+        elif not pd.api.types.is_numeric_dtype(frame[predictor]):
+            problem = f"Biến giải thích '{predictor}' phải là cột số."
+        if problem:
+            # An optional covariate (control / secondary exposure) that is text or
+            # unmapped is removed and reported, instead of blocking the design.
+            if drop_optional_predictors and predictor in needs and not needs[predictor].required:
+                dropped.append({"variable": predictor, "reason": problem})
+                continue
+            raise ValueError(problem)
+        predictors.append(predictor)
+    if design.method in ("ols", "correlation") and not predictors:
+        raise ValueError("Phương pháp cần có biến giải thích dạng số.")
+    subset = [design.target] + predictors
     complete = frame[subset].replace([float("inf"), -float("inf")], float("nan")).dropna()
-    if len(complete) < max(3, len(design.predictors)+3 if design.method == "ols" else 3):
+    if len(complete) < max(3, len(predictors)+3 if design.method == "ols" else 3):
         raise ValueError("Không đủ bản ghi hợp lệ cho phương pháp đề xuất.")
     if design.method in ("ols", "correlation") and any(complete[c].nunique() < 2 for c in subset):
         raise ValueError("Biến phân tích không có biến thiên.")
     if design.method == "ols":
         import numpy as np
-        matrix = np.column_stack([np.ones(len(complete)), complete[design.predictors].to_numpy(dtype=float)])
+        matrix = np.column_stack([np.ones(len(complete)), complete[predictors].to_numpy(dtype=float)])
         if np.linalg.matrix_rank(matrix) < matrix.shape[1]:
             raise ValueError("Các biến giải thích phụ thuộc tuyến tính; cần điều chỉnh mô hình.")
     return frame, {"ok": True, "rows": len(frame), "complete_analysis_rows": len(complete),
+                   "predictors": predictors, "dropped_predictors": dropped,
                    "columns": list(frame), "joins": joins, "provenance": provenance,
                    "warnings": ["Chỉ phân tích liên hệ quan sát; chưa có thiết kế nhận diện tác động nhân quả."]}
 

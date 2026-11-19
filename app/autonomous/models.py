@@ -16,9 +16,9 @@ class StartRun(StrictModel):
     project_id: int | None = Field(default=None, gt=0)
     region: str | None = Field(default=None, max_length=200)
     target_paper_count: int = Field(default=15, ge=3, le=50)
-    max_sources: int = Field(default=6, ge=1, le=10)
+    max_sources: int = Field(default=8, ge=1, le=10)
     max_rows: int = Field(default=10000, ge=100, le=50000)
-    collection_seconds: int = Field(default=180, ge=30, le=600)
+    collection_seconds: int = Field(default=240, ge=30, le=600)
     authors: list[PaperAuthor] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="after")
@@ -128,6 +128,8 @@ class Decision(StrictModel):
     action: Literal["approve", "revise"]
     notes: str = Field(default="", max_length=4000)
     restart_from: Literal["research_plan", "data_collection", "design", "introduction", "manuscript", "verification"] | None = None
+    # Re-plan the question but keep the already downloaded sources (data-grounded alternatives).
+    keep_sources: bool = False
 
 
 class VersionRequest(StrictModel):
@@ -194,3 +196,22 @@ class ProposalDraft(StrictModel):
 class ProposalRevision(StrictModel):
     expected_version: int = Field(ge=1)
     instruction: str = Field(min_length=3, max_length=4000)
+
+
+class ColumnRef(StrictModel):
+    source_key: str
+    column: str
+    concept: str
+
+
+class AlternativeQuestion(StrictModel):
+    question: str = Field(min_length=10)
+    rationale: str
+    outcome: ColumnRef
+    exposures: list[ColumnRef] = Field(min_length=1, max_length=4)
+    join_columns: list[str] = Field(default_factory=list, max_length=4)
+    scope_change: str
+
+
+class AlternativeQuestions(StrictModel):
+    alternatives: list[AlternativeQuestion] = Field(default_factory=list, max_length=3)

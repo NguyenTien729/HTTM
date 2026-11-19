@@ -148,6 +148,9 @@ def check_manuscript(manuscript):
     """Exact source linkage is deterministic; entailment requires a separate review."""
     sources = {s["source_id"]: s for s in manuscript["evidence_sources"]}
     errors, coverage = [], []
+    # Numbers in the approved topic (e.g. "năm 1985", "2010–2022") describe the
+    # review's scope, not a finding, so they need no supporting excerpt.
+    scope_numbers = set(re.findall(r"(?<!\w)\d+(?:[.,]\d+)?%?", str(manuscript.get("title") or "")))
     for section in manuscript["sections"]:
         if section["key"] == "methodology":
             continue
@@ -165,7 +168,7 @@ def check_manuscript(manuscript):
             clean = re.sub(r"\[\d+\]", "", paragraph["text"])
             numbers = re.findall(r"(?<!\w)\d+(?:[.,]\d+)?%?", clean)
             quotes = " ".join(link["quote"] for link in links)
-            source_numbers = set(re.findall(r"(?<!\w)\d+(?:[.,]\d+)?%?", quotes))
+            source_numbers = set(re.findall(r"(?<!\w)\d+(?:[.,]\d+)?%?", quotes)) | scope_numbers
             for number in numbers:
                 if number not in source_numbers:
                     errors.append({"paragraph_id": pid, "reason": f"Số liệu {number} chưa có trong đoạn bằng chứng; cần rà soát."})

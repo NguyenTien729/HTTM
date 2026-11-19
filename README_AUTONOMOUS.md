@@ -56,6 +56,30 @@ hỏi vô hiệu hóa toàn bộ dữ liệu, thiết kế, phân tích và bả
 phương pháp vô hiệu hóa kết quả và bài viết; sửa văn bản giữ lại phân tích đã duyệt.
 Các phiên bản trước vẫn được lưu trong hồ sơ kiểm toán.
 
+## Dữ liệu trước, câu hỏi sau: giảm lỗi khi tự tìm dataset
+
+Nhiều đề tài không có bộ dữ liệu công khai ổn định, nên việc "chốt câu hỏi rồi mới
+đi tìm dữ liệu" dễ thất bại ở bước thiết kế. Nhánh thực nghiệm có ba cơ chế để biết
+sớm và chuyển sang câu hỏi trả lời được, không bao giờ tạo dữ liệu giả:
+
+1. **Nguồn ổn định World Bank (WDI).** Mỗi biến được tìm thêm trong khoảng 1.500 chỉ số
+   World Development Indicators (`app/data_research/worldbank.py`). Dữ liệu tải về dạng
+   `country_iso3, country, year, <mã chỉ số>` cho mọi nền kinh tế (đã bỏ vùng/nhóm thu nhập),
+   chỉ trong giai đoạn của kế hoạch, ghép được theo quốc gia × năm. Danh mục chỉ số được
+   lưu đệm 7 ngày ở `artifacts/worldbank-cache/`. Không có số liệu cấp tỉnh hoặc cá nhân.
+2. **Kiểm tra khả thi dữ liệu ngay khi lập kế hoạch.** Trước điểm duyệt câu hỏi, hệ thống
+   tìm nhanh (chỉ metadata, không tải) nguồn ứng viên cho từng biến trên World Bank,
+   Hugging Face và Mendeley, rồi hiện bảng **Khả năng có dữ liệu**: biến nào chưa có ứng
+   viên. Người dùng sửa câu hỏi hoặc tải dữ liệu của nhóm trước khi duyệt. Nếu đã tải file,
+   nút **Lập lại câu hỏi theo dữ liệu nhóm đã tải** lập kế hoạch mới đo được bằng các cột đó.
+3. **Câu hỏi thay thế theo dữ liệu có sẵn.** Khi thiết kế bị chặn mà đã có snapshot, LLM đề
+   xuất tối đa 3 câu hỏi cùng lĩnh vực. Mỗi câu chỉ được giữ nếu mọi cột tồn tại thật, là
+   cột số, và hai nguồn có khóa ghép chung (kiểm tra bằng code). Nút **Dùng câu hỏi này**
+   lập lại kế hoạch, ghi rõ thay đổi phạm vi và **giữ nguyên các nguồn đã tải**
+   (`Decision.keep_sources=true`); thiết kế và phân tích vẫn được kiểm tra lại đầy đủ.
+
+Kết quả tìm kiếm chỉ là ứng viên; không thấy ứng viên không chứng minh dữ liệu không tồn tại.
+
 ## Nhận dữ liệu của nhóm nghiên cứu (tìm **hoặc nhận** dữ liệu)
 
 Ngoài việc tự tìm dữ liệu công khai, nhánh thực nghiệm nhận file do nhóm tự có
@@ -141,7 +165,7 @@ PDF lấy nội dung từ snapshot run được duyệt, không lấy bản vi�
 
 ## Giới hạn được áp dụng
 
-- Nguồn hiện có: Hugging Face, Mendeley Data/DataCite và file do nhóm nghiên cứu tải lên. Chưa có connector trực tiếp cho
+- Nguồn hiện có: World Bank (WDI), Hugging Face, Mendeley Data/DataCite và file do nhóm nghiên cứu tải lên. Chưa có connector trực tiếp cho
   FAOSTAT, NASA, ERA5 hoặc cổng thống kê quốc gia. Kiến trúc cho phép bổ sung connector;
   không tuyên bố đã truy cập những nguồn chưa tích hợp.
 - Tối đa 10 snapshot ứng viên; thiết kế chọn tối đa 3 nguồn. Mặc định 6 snapshot,
@@ -214,7 +238,7 @@ Hoặc gửi `project_id` thay cho `topic`. Project tổng quan (`review`) khôn
 ## Kiểm thử
 
 ```powershell
-python -m pytest tests/test_autonomous.py tests/test_autonomous_uploads.py -q
+python -m pytest tests/test_autonomous.py tests/test_autonomous_uploads.py tests/test_data_roadmap.py -q
 python -m tests.autonomous_browser_smoke
 ```
 

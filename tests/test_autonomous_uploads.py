@@ -309,3 +309,155 @@ async def test_upload_endpoint_reports_bad_files_and_stale_versions(api):
             data={"expected_version": "5", "description": "ngắn"},
             files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")})
         assert short.status_code == 422
+
+
+def test_single_upload_needs_no_join_key_and_text_controls_are_dropped_not_blocking():
+    from app.autonomous.models import ResearchBrief
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "individual", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "id"), ("wage", "outcome", "USD/hour"),
+                                    ("schooling", "exposure", "years"), ("experience", "control", "years"),
+                                    ("sex", "control", "group")]], feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{x};{'male' if i % 2 else 'female'}\n"
+                   for i, (w, e, x) in enumerate([("5,1", 8, 21), ("6,7", 12, 1), ("4", 12, 4), ("7,5", 12, 17),
+                                                  ("13,1", 16, 9), ("4,45", 10, 27), ("19,5", 18, 12)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;kn;gioi\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    collection = {"sources": value["artifacts"]["user_sources"]}
+    spec = AnalysisDesign(adequate=True, rationale="Một nguồn", sources=[{"source_key": "s01", "bindings": [
+        binding("wage", "luong", "USD/hour"), binding("schooling", "hoc", "years"),
+        binding("experience", "kn", "years"), binding("sex", "gioi", "group")]}],
+        method="ols", target="wage", predictors=["schooling", "experience", "sex"]).model_dump()
+    with pytest.raises(ValueError, match="phải là cột số"):
+        data.prepare_data(1, plan, spec, collection, 100)
+    frame, report = data.prepare_data(1, plan, spec, collection, 100, drop_optional_predictors=True)
+    assert report["predictors"] == ["schooling", "experience"]
+    assert report["dropped_predictors"][0]["variable"] == "sex"
+    # A predictor that is not an optional planned variable is never silently dropped.
+    with pytest.raises(ValueError, match="không hợp lệ"):
+        data.prepare_data(1, plan, dict(spec, predictors=["schooling", "invented"]), collection, 100, True)
+
+
+async def test_design_stage_freezes_the_reduced_model_and_passes_validation(monkeypatch):
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.state import fingerprint
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "individual", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "id"), ("wage", "outcome", "USD/hour"),
+                                    ("schooling", "exposure", "years"), ("sex", "control", "group")]],
+        feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{'male' if i % 2 else 'female'}\n" for i, (w, e) in
+                   enumerate([("5,1", 8), ("6,7", 12), ("4", 11), ("7,5", 13), ("13,1", 16), ("4,45", 10), ("19,5", 18)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;gioi\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    value["artifacts"].update(research_plan=plan, data_collection={"sources": value["artifacts"]["user_sources"]},
+                              approvals=[{"stage": "research_plan", "fingerprint": fingerprint(plan)}])
+
+    async def llm(prompt, schema):
+        return AnalysisDesign(adequate=True, rationale="Một nguồn", method="ols", target="wage",
+                              predictors=["schooling", "sex"], sources=[{"source_key": "s01", "bindings": [
+                                  binding("wage", "luong", "USD/hour"), binding("schooling", "hoc", "years"),
+                                  binding("sex", "gioi", "group")]}])
+    monkeypatch.setattr(pipeline, "generate_structured", llm)
+    result = await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is True
+    assert result["predictors"] == ["schooling"] and any("sex" in item for item in result["limitations"])
+
+
+async def test_design_accepts_same_unit_written_differently_but_not_undeclared_conversions(monkeypatch):
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.state import fingerprint
+    plan = ResearchBrief(
+        question="Số năm đi học liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": k, "concept": k, "role": r, "unit": u, "resolution": "cá nhân", "search_terms": [k]}
+                    for k, r, u in [("person_id", "join_key", "mã"), ("wage", "outcome", "USD/giờ"),
+                                    ("schooling", "exposure", "năm"), ("region", "exposure", "phân loại")]],
+        feasibility_notes="Một nguồn cá nhân.").model_dump()
+    rows = "".join(f"{w};{e};{'south' if i % 2 else 'other'}\n" for i, (w, e) in
+                   enumerate([("5,1", 8), ("6,7", 12), ("4", 11), ("7,5", 13), ("13,1", 16), ("4,45", 10), ("19,5", 18)]))
+    frame, log = uploads.parse_and_clean(("luong;hoc;vung\n" + rows).encode(), "cps.csv")
+    value = uploads.attach_user_source(user_run(), frame, log, description="Mẫu CPS 1985 của nhóm")
+    value["artifacts"].update(research_plan=plan, data_collection={"sources": value["artifacts"]["user_sources"]},
+                              approvals=[{"stage": "research_plan", "fingerprint": fingerprint(plan)}])
+    english = lambda var, col, unit, **kw: {"variable": var, "column": col, "source_unit": unit, "target_unit": unit,
+                                            "rationale": "Cột gốc", **kw}
+    proposal = {"bindings": [english("wage", "luong", "USD/hour"), english("schooling", "hoc", "years"),
+                             english("region", "vung", "category")]}
+
+    async def llm(prompt, schema):
+        return AnalysisDesign(adequate=True, rationale="Một nguồn", method="ols", target="wage",
+                              predictors=["schooling", "region"], sources=[{"source_key": "s01", **proposal}])
+    monkeypatch.setattr(pipeline, "generate_structured", llm)
+    result = await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is True
+    assert result["predictors"] == ["schooling"]
+    assert {b["target_unit"] for b in result["sources"][0]["bindings"]} == {"USD/giờ", "năm", "phân loại"}
+    # A declared conversion keeps its labels, so a wrong target unit is still refused.
+    proposal["bindings"][0] = english("wage", "luong", "cents/hour", scale=0.01)
+    proposal["bindings"][0]["target_unit"] = "USD/hour"
+    await pipeline.design(value)
+    assert value["artifacts"]["design_validation"]["ok"] is False
+
+
+def test_design_bindings_that_name_columns_are_mapped_to_plan_keys():
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.pipeline import repair_binding_variables
+    brief = ResearchBrief(
+        question="Kinh nghiệm và tuổi liên hệ thế nào với lương theo giờ năm 1985?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "wage", "role": "dependent", "description": "Lương"}], geography="United States", time_scope="1985",
+        data_needs=[{"key": "hourly_wage", "concept": "Tiền lương theo giờ", "role": "outcome", "unit": "USD/giờ",
+                     "resolution": "cấp cá nhân", "search_terms": ["wage"]},
+                    {"key": "work_experience", "concept": "Số năm kinh nghiệm làm việc", "role": "exposure", "unit": "năm",
+                     "resolution": "cấp cá nhân", "search_terms": ["experience"]},
+                    {"key": "age", "concept": "Tuổi của người lao động", "role": "exposure", "unit": "năm",
+                     "resolution": "cấp cá nhân", "required": False, "search_terms": ["age"]}],
+        feasibility_notes="Một nguồn cá nhân.")
+    proposed = AnalysisDesign(adequate=True, rationale="Một nguồn", sources=[{"source_key": "s01", "bindings": [
+        binding("Lương giờ (USD)", "Lương giờ (USD)", "USD/giờ"), binding("Kinh nghiệm (năm)", "Kinh nghiệm (năm)", "năm"),
+        binding("Tuổi", "Tuổi", "năm")]}], method="ols", target="Lương giờ (USD)",
+        predictors=["Kinh nghiệm (năm)", "Tuổi"])
+    fixed = repair_binding_variables(proposed, brief)
+    assert [b.variable for b in fixed.sources[0].bindings] == ["hourly_wage", "work_experience", "age"]
+    assert fixed.target == "hourly_wage" and fixed.predictors == ["work_experience", "age"]
+    # A column that matches no planned concept stays unmapped and is still reported as invalid.
+    odd = AnalysisDesign(adequate=True, rationale="x", sources=[{"source_key": "s01", "bindings": [
+        binding("hourly_wage", "Lương giờ (USD)", "USD/giờ"), binding("union", "union", "group")]}], method="ols")
+    assert [b.variable for b in repair_binding_variables(odd, brief).sources[0].bindings] == ["hourly_wage", "union"]
+
+
+def test_filters_on_row_identifier_columns_are_dropped():
+    from app.autonomous.pipeline import drop_row_identifier_filters
+    collection = {"sources": [{"source_key": "s01", "rows": 534, "columns": [
+        {"name": "rownames", "unique": 534}, {"name": "region", "unique": 2}, {"name": "wage", "unique": 238}]}]}
+    proposed = AnalysisDesign(adequate=True, rationale="x", method="ols", sources=[{"source_key": "s01",
+        "filters": [{"column": "rownames", "operator": "between", "values": [1, 534], "rationale": "giữ toàn bộ"},
+                    {"column": "region", "operator": "in", "values": ["south"], "rationale": "vùng"}],
+        "bindings": [binding("wage", "wage", "USD/giờ")]}])
+    fixed = drop_row_identifier_filters(proposed, collection)
+    assert [f.column for f in fixed.sources[0].filters] == ["region"]
+    assert any("rownames" in item for item in fixed.assumptions)
+
+
+def test_duplicate_binding_is_not_moved_to_the_next_closest_concept():
+    from app.autonomous.models import ResearchBrief
+    from app.autonomous.pipeline import repair_binding_variables
+    brief = ResearchBrief(
+        question="GDP bình quân đầu người liên hệ thế nào với tuổi thọ năm 2019?", gap="Kiểm thử.", evidence_paper_ids=[1],
+        variables=[{"name": "le", "role": "dependent", "description": "Tuổi thọ"}], geography="Thế giới", time_scope="2019",
+        data_needs=[{"key": "life_expectancy", "concept": "Tuổi thọ trung bình", "role": "outcome", "unit": "năm",
+                     "resolution": "quốc gia", "search_terms": ["life"]},
+                    {"key": "gdp_per_capita", "concept": "GDP bình quân đầu người", "role": "exposure", "unit": "USD/người",
+                     "resolution": "quốc gia", "search_terms": ["gdp"]},
+                    {"key": "co2_per_capita", "concept": "Phát thải CO2 bình quân đầu người", "role": "control", "unit": "tấn/người",
+                     "resolution": "quốc gia", "required": False, "search_terms": ["co2"]}],
+        feasibility_notes="Kiểm thử.")
+    proposed = AnalysisDesign(adequate=True, rationale="x", method="ols", sources=[{"source_key": "s01", "bindings": [
+        binding("life_expectancy", "le", "năm"), binding("gdp_per_capita", "gdppc_ppp", "USD/người"),
+        binding("GDP bình quân đầu người (PPP)", "gdppc_ppp", "USD/người")]}])
+    fixed = repair_binding_variables(proposed, brief)
+    assert [b.variable for b in fixed.sources[0].bindings][2] == "GDP bình quân đầu người (PPP)"

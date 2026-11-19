@@ -378,7 +378,8 @@ def _check_can_change(run: dict) -> None:
 def _redo_design(run: dict) -> None:
     """New or removed data invalidates the design and everything after it."""
     keep = {"settings", "topic", "literature_search", "literature_read", "literature_synthesis", "approvals",
-            "research_plan", "data_collection", "user_sources", "data_preferences", "data_search_guidance", "feedback"}
+            "research_plan", "data_feasibility", "data_collection", "user_sources", "data_preferences",
+            "data_search_guidance", "feedback"}
     run["artifacts"] = {k: v for k, v in run["artifacts"].items() if k in keep}
     run.update(stage="design", status="queued", error=None)
 

@@ -29,7 +29,7 @@ def test_analyze_dataframe_returns_real_descriptive_statistics_and_drafts():
     assert result["ols_regression"]["status"] == "ok"
     assert "Methods" not in result["methods_draft"]  # draft is plain prose, not a fake heading
     assert "6 dòng" in result["methods_draft"]
-    assert "R²=" in result["results_draft"]
+    assert "R² =" in result["results_draft"]
 
 
 def test_validate_dataset_id_rejects_arbitrary_path():

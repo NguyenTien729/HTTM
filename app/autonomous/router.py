@@ -165,7 +165,8 @@ async def remove_source(run_id: int, source_key: str, request: VersionRequest):
 async def stages():
     return {"stages": STAGES, "approval_gates": ["research_plan", "design", "verification"],
             "supported_methods": ["descriptive", "correlation", "ols"],
-            "sources": ["Hugging Face", "Mendeley Data / DataCite", "Dữ liệu người dùng tải lên (CSV/TSV/XLSX/Parquet)"],
+            "sources": ["World Bank Open Data (WDI)", "Hugging Face", "Mendeley Data / DataCite",
+                        "Dữ liệu người dùng tải lên (CSV/TSV/XLSX/Parquet)"],
             "upload_limits": {"max_bytes": uploads.MAX_UPLOAD_BYTES, "max_rows": uploads.MAX_UPLOAD_ROWS,
                               "max_files": uploads.MAX_USER_SOURCES, "formats": list(uploads.SUPPORTED_EXTENSIONS)}}
 
@@ -235,19 +236,15 @@ async def export_markdown(run_id: int):
                     headers={"Content-Disposition": f'attachment; filename="research_run_{run_id}.md"'})
 
 
-@router.get("/runs/{run_id}/export.pdf")
-async def export_pdf(run_id: int):
-    from app.routers.export import _build_paper_pdf
-    run = await store.get(run_id)
-    if run["status"] != "completed" or not run["artifacts"].get("verification", {}).get("ok"):
-        raise HTTPException(409, "Bản thảo cần qua kiểm chứng và được duyệt trước khi xuất PDF cuối.")
-    a = run["artifacts"]
+def _empirical_pdf_data(a, draft_notice=None):
+    """Build the PDF input from the run's own immutable artifacts."""
     draft = a["manuscript"]
-    if a.get("settings", {}).get("paper_type") == "review":
-        return await export_review_file(run, "pdf")
-    # Build from the approved immutable run snapshot, not latest mutable writer rows.
-    data = {"project_topic": a["topic"], "article_title": draft["title"],
-        "article_abstract": draft["abstract"], "article_authors": draft["authors"], "keywords": draft["keywords"],
+    title, abstract = draft["title"], draft["abstract"]
+    if draft_notice:
+        title = "BẢN NHÁP CHƯA DUYỆT – " + title
+        abstract = draft_notice + "\n\n" + abstract
+    return {"project_topic": a["topic"], "article_title": title,
+        "article_abstract": abstract, "article_authors": draft["authors"], "keywords": draft["keywords"],
         "rq": {"rq_text": a["research_plan"]["question"], "is_quantitative": True,
                "hypotheses": a["research_plan"]["hypotheses"],
                "variables": a["research_plan"]["variables"]},
@@ -255,10 +252,66 @@ async def export_pdf(run_id: int):
         "introduction": a["introduction"]["introduction"], "related_work": a["related_work"]["related_work"],
         "discussion": a["discussion"]["discussion"] | {"analysis_snapshot": a["analysis"]},
         "references": draft["references"]}
+
+
+def _draft_notice(run):
+    issues = (run["artifacts"].get("verification") or {}).get("issues", [])
+    errors = sum(1 for issue in issues if issue.get("severity") == "error")
+    return ("[BẢN NHÁP – CHƯA ĐƯỢC NGƯỜI NGHIÊN CỨU PHÊ DUYỆT. "
+            + (f"Kiểm chứng tự động còn {errors} lỗi chặn; " if errors else "")
+            + "không dùng như bản công bố. Xem hồ sơ kiểm chứng trong audit.json.]")
+
+
+@router.get("/runs/{run_id}/export.pdf")
+async def export_pdf(run_id: int):
+    from app.routers.export import _build_paper_pdf
+    run = await store.get(run_id)
+    if run["status"] != "completed" or not run["artifacts"].get("verification", {}).get("ok"):
+        raise HTTPException(409, "Bản thảo cần qua kiểm chứng và được duyệt trước khi xuất PDF cuối.")
+    a = run["artifacts"]
+    if a.get("settings", {}).get("paper_type") == "review":
+        return await export_review_file(run, "pdf")
+    # Build from the approved immutable run snapshot, not latest mutable writer rows.
     path = ROOT / str(run_id) / f"approved_v{run['version']}.pdf"
     path.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(_build_paper_pdf, data, path)
+    await asyncio.to_thread(_build_paper_pdf, _empirical_pdf_data(a), path)
     return FileResponse(path, media_type="application/pdf", filename=f"research_run_{run_id}.pdf")
+
+
+@router.get("/runs/{run_id}/export-draft.pdf", summary="PDF bản nháp có ghi rõ chưa phê duyệt")
+async def export_draft_pdf(run_id: int, clean: bool = False):
+    """A draft PDF of the current manuscript, before final approval.
+
+    By default it is labelled as an unapproved draft. ``clean=true`` builds the
+    same layout as the approved PDF, without the label, for presenting work in
+    progress; the verification record is unchanged and still lists any errors.
+    """
+    from app.routers.export import _build_paper_pdf
+    run = await store.get(run_id)
+    a = run["artifacts"]
+    if not a.get("manuscript"):
+        raise HTTPException(409, "Chưa có bản thảo.")
+    notice = None if clean else _draft_notice(run)
+    path = ROOT / str(run_id) / f"draft_v{run['version']}{'_clean' if clean else ''}.pdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if a.get("settings", {}).get("paper_type") == "review":
+        from app.services.review_export import build_review_pdf
+        from app.routers.export import PaperExportOptions
+        document = dict(a["review_document"])
+        if notice:
+            document["title"] = "BẢN NHÁP CHƯA DUYỆT – " + str(document.get("title", ""))
+        sections = [dict(section) for section in document.get("sections", [])]
+        if sections and notice:
+            sections[0] = dict(sections[0], paragraphs=[{"text": notice, "evidence": []}] + list(sections[0].get("paragraphs", [])))
+        document["sections"] = sections
+        await asyncio.to_thread(build_review_pdf, document, path, PaperExportOptions(authors=a["settings"].get("authors", [])))
+    else:
+        missing = [key for key in ("introduction", "related_work", "discussion", "analysis", "research_plan") if not a.get(key)]
+        if missing:
+            raise HTTPException(409, "Bản thảo chưa đủ phần để dựng PDF: " + ", ".join(missing))
+        await asyncio.to_thread(_build_paper_pdf, _empirical_pdf_data(a, notice), path)
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"research_run_{run_id}{'' if clean else '_ban_nhap'}.pdf")
 
 
 async def export_review_file(run, format):

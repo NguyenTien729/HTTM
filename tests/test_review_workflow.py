@@ -249,3 +249,13 @@ async def test_validation_returns_new_automatically_repaired_version(monkeypatch
     assert updates[0][0] == 2
     assert saved_versions[0]["evidence_sources"] == before["evidence_sources"]
     assert "Đã điều chỉnh" not in before["sections"][0]["paragraphs"][0]["text"]
+
+
+def test_years_from_the_approved_topic_need_no_excerpt_but_other_numbers_do():
+    m = manuscript()
+    m["title"] = "Học vấn và tiền lương của người lao động Mỹ năm 1985"
+    p = m["sections"][0]["paragraphs"][0]
+    p["text"] += " Phạm vi là người lao động năm 1985."
+    assert not any("1985" in e["reason"] for e in engine.check_manuscript(m)["errors"])
+    p["text"] += " Lương tăng 12%."
+    assert any("12%" in e["reason"] for e in engine.check_manuscript(m)["errors"])

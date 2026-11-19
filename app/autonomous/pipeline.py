@@ -10,7 +10,7 @@ from app.services.llm import generate_structured
 from app.services.vietnamese_writing import VIETNAMESE_WRITING_RULE
 from . import data
 from .models import (ResearchBrief, AnalysisDesign, FrontMatter, ScientificAudit,
-                     PaperStory, ProposalDraft, ClaimEvidenceMap)
+                     PaperStory, ProposalDraft, ClaimEvidenceMap, AlternativeQuestions)
 from .state import fingerprint
 
 
@@ -103,16 +103,36 @@ async def create_proposal_draft(run, blockers, coverage):
     return draft
 
 
+def available_data_context(artifacts):
+    """Schema of team uploads and sources kept from a previous collection, for planning."""
+    sources = list(artifacts.get("user_sources", []))
+    known = {s.get("source_key") for s in sources}
+    sources += [s for s in (artifacts.get("data_collection") or {}).get("sources", []) if s.get("source_key") not in known]
+    return [{"source_key": s.get("source_key"), "title": s.get("candidate", {}).get("title"),
+             "origin": "team_upload" if s.get("candidate", {}).get("user_provided") else s.get("candidate", {}).get("source"),
+             "description": str(s.get("candidate", {}).get("description", ""))[:800], "rows": s.get("rows"),
+             "columns": [{"name": c.get("name"), "dtype": c.get("dtype")} for c in s.get("columns", [])[:60]],
+             "sample": (s.get("sample") or [])[:3]} for s in sources]
+
+
 async def research_plan(run):
     corpus = await evidence(run["project_id"])
     if not corpus:
         raise ValueError("Chưa có tài liệu đã đọc làm bằng chứng; không thể tự bịa khoảng trống.")
+    available = available_data_context(run["artifacts"])
+    data_rule = ("Dữ liệu đã có sẵn cho tiến trình này (file nhóm tải lên hoặc nguồn đã kiểm tra) được liệt kê dưới đây. "
+                 "Nếu phù hợp với đề tài, đặt câu hỏi và data_needs sao cho đo được bằng các cột có thật này: "
+                 "search_terms và unit mô tả đúng cột, không đổi đề tài và không bịa cột. "
+                 "Nếu dữ liệu không phù hợp đề tài thì bỏ qua và nêu rõ trong feasibility_notes.\n"
+                 + json.dumps(available, ensure_ascii=False, default=str) + "\n") if available else ""
     brief = await generate_structured(
         VIETNAMESE_WRITING_RULE + "Lập hồ sơ nghiên cứu định lượng bằng dữ liệu thứ cấp. "
         "Đề tài bất biến: " + run["artifacts"]["topic"] + "\n"
         + "Địa bàn người dùng yêu cầu: " + str(run["artifacts"]["settings"].get("region") or "suy ra từ đề tài") + "\n" +
         "Giữ đúng địa bàn và đối tượng. Đề xuất một câu hỏi và khoảng trống thận trọng dựa trên tài liệu; "
         "không tuyên bố đã chứng minh tính mới hay đã tìm thấy dữ liệu. Giả thuyết là dự kiến, không phải kết quả. "
+        "Trong gap, question và feasibility_notes chỉ nhắc tài liệu bằng [id] trong bằng chứng, không tự ghi tên tác giả hay năm "
+        "(tên tác giả viết sai sẽ lan sang bản thảo); không ghi hệ số hay con số không có trong dữ liệu hoặc tài liệu. "
         "Tách data_needs theo biến kết quả, phơi nhiễm/giải thích, kiểm soát và khóa ghép. "
         "Chọn đúng MỘT outcome chính phù hợp nhất với câu hỏi vì bộ phân tích chỉ hỗ trợ một biến đích; không tạo hai outcome thay thế cùng bắt buộc. "
         "Nếu người dùng nêu nhiều outcome thay thế, chọn một outcome chính và ghi lựa chọn còn lại trong feasibility_notes. "
@@ -124,13 +144,199 @@ async def research_plan(run):
         "Chỉ nâng control thành bắt buộc nếu câu hỏi người dùng nói rõ cần kiểm soát biến đó. "
         "geography_terms chỉ gồm các cách gọi tương đương của địa bàn, không đưa khu vực khác hoặc ngôn ngữ thay địa bàn. "
         "evidence_paper_ids chỉ lấy ID trong bằng chứng bên dưới. Nếu cần dữ liệu bảng/chuỗi thời gian, nêu rõ "
-        "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả.\n"
+        "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả. "
+        "GIỚI HẠN PHÂN TÍCH: chỉ có thống kê mô tả, tương quan Pearson và OLS tuyến tính trên biến SỐ; không có số hạng bình phương, "
+        "biến tương tác, so sánh hay kiểm định khác biệt giữa các nhóm, mô hình bảng hay chuỗi thời gian. Vì vậy mỗi giả thuyết phải kiểm định "
+        "được bằng dấu/độ lớn của một hệ số OLS hoặc một tương quan giữa biến số: không đặt giả thuyết phi tuyến, giảm dần, tương tác, "
+        "điều tiết hay khác biệt giữa nam/nữ, vùng, nhóm. Biến dạng phân loại chữ (giới tính, vùng, nghề) chỉ đưa vào data_needs khi "
+        "nguồn có sẵn dạng số 0/1; nếu không thì nêu trong feasibility_notes. Chỉ thêm join_key khi dự kiến phải ghép từ hai nguồn trở lên; "
+        "dữ liệu một bảng cấp cá nhân không cần join_key.\n"
         + "Yêu cầu bổ sung của người dùng: " + run["artifacts"].get("feedback", "") + "\n"
+        + data_rule
         + json.dumps(corpus, ensure_ascii=False, default=str), ResearchBrief)
     valid = {p["id"] for p in corpus}
     if not set(brief.evidence_paper_ids).issubset(valid):
         raise ValueError("Kế hoạch dẫn tài liệu không thuộc bằng chứng đã đọc.")
+    # Tell the user, before approval, whether each variable has any candidate source.
+    try:
+        run["artifacts"]["data_feasibility"] = await data.probe_feasibility(
+            brief, run["artifacts"].get("user_sources", []),
+            seconds=float(run["artifacts"].get("settings", {}).get("feasibility_seconds", 75)))
+    except Exception as exc:  # The probe is advisory; never block planning on it.
+        run["artifacts"]["data_feasibility"] = {"schema_version": "httm/data-feasibility-v1", "verdict": "unknown",
+                                                "needs": [], "errors": [{"error": type(exc).__name__}]}
     return brief.model_dump()
+
+
+def _numeric(dtype):
+    return str(dtype).lower().startswith(("int", "uint", "float", "double"))
+
+
+def validate_alternatives(proposal, collection):
+    """Keep only alternatives whose every column exists, is numeric and is joinable."""
+    columns = {s["source_key"]: {c["name"]: c.get("dtype") for c in s.get("columns", [])}
+               for s in collection.get("sources", [])}
+    valid, rejected = [], []
+    for item in proposal.alternatives:
+        refs = [item.outcome, *item.exposures]
+        used = sorted({ref.source_key for ref in refs})
+        problem = None
+        for ref in refs:
+            if ref.source_key not in columns or ref.column not in columns[ref.source_key]:
+                problem = f"Cột {ref.source_key}:{ref.column} không có trong snapshot."
+            elif not _numeric(columns[ref.source_key][ref.column]):
+                problem = f"Cột {ref.source_key}:{ref.column} không phải biến số."
+            if problem:
+                break
+        if not problem and len(used) > 2:
+            problem = "Dùng quá hai nguồn."
+        if not problem and len(used) == 2 and (not item.join_columns or any(
+                col not in columns[key] for key in used for col in item.join_columns)):
+            problem = "Hai nguồn không có cột khóa ghép chung đã khai báo."
+        if problem:
+            rejected.append({"question": item.question, "reason": problem})
+        else:
+            valid.append(item.model_dump() | {"source_keys": used})
+    return valid, rejected
+
+
+async def suggest_alternatives(run, brief, collection, blockers):
+    """Data-grounded questions on the same topic, when the approved one has no usable data."""
+    papers = [p for p in await evidence(run["project_id"]) if p["id"] in set(brief.evidence_paper_ids)]
+    proposal = await generate_structured(
+        VIETNAMESE_WRITING_RULE +
+        "Câu hỏi nghiên cứu đã duyệt chưa có dữ liệu phù hợp. Đề xuất tối đa 3 câu hỏi THAY THẾ cùng lĩnh vực với đề tài, "
+        "mỗi câu trả lời được bằng các snapshot dữ liệu THỰC TẾ bên dưới ở mức liên hệ quan sát (mô tả, tương quan, OLS). "
+        "outcome và exposures phải trỏ đúng source_key và tên cột có thật, là cột số đo đúng khái niệm; không dùng cột mã/ID. "
+        "Nếu dùng hai nguồn thì join_columns phải là các cột có trong cả hai nguồn. "
+        "scope_change nói thẳng điểm khác so với câu hỏi gốc (biến, địa bàn, đơn vị phân tích, thời gian). "
+        "Không đề xuất câu hỏi nhân quả, không bịa cột hay nguồn. Nếu không có câu hỏi hợp lý, trả danh sách rỗng.\n"
+        + json.dumps({"topic": run["artifacts"]["topic"], "approved_question": brief.question,
+                      "blockers": blockers, "literature": [{k: p.get(k) for k in ("id", "title", "key_finding")} for p in papers][:20]},
+                     ensure_ascii=False, default=str) + "\n" + data.design_context(collection), AlternativeQuestions)
+    valid, rejected = validate_alternatives(proposal, collection)
+    return {"alternatives": valid, "rejected": rejected,
+            "note": "Câu hỏi thay thế dựa trên cột có thật trong dữ liệu đã tải; chọn một câu sẽ lập lại kế hoạch "
+                    "và giữ nguyên các nguồn đã tải. Thiết kế và phân tích vẫn được kiểm tra lại đầy đủ."}
+
+
+def align_units(proposed, brief):
+    """Use the approved unit label for bindings that declare no conversion.
+
+    The planner writes units in Vietnamese ("USD/giờ", "năm") while the design
+    LLM may write the same unit in English ("USD/hour", "years"). A binding with
+    scale 1 and offset 0 asserts the column is already in the approved unit, so
+    its labels are set to that unit. Bindings that declare a real conversion
+    keep their labels and remain subject to the strict unit checks.
+    """
+    units = {need.key: need.unit for need in brief.data_needs}
+    value = proposed.model_dump()
+    changed = []
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            unit = units.get(binding["variable"])
+            if unit is None or binding["target_unit"] == unit:
+                continue
+            if binding["scale"] == 1 and binding["offset"] == 0:
+                changed.append(f"{binding['variable']}: '{binding['target_unit']}' → '{unit}'")
+                binding["target_unit"] = binding["source_unit"] = unit
+    if not changed:
+        return proposed
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Cột được dùng đúng đơn vị đã duyệt, không đổi đơn vị (chuẩn hóa nhãn: " + "; ".join(changed) + ")."]
+    return AnalysisDesign.model_validate(value)
+
+
+def _words(text):
+    import re
+    import unicodedata
+    text = unicodedata.normalize("NFC", str(text or "")).casefold()
+    return {w for w in re.findall(r"\w+", text) if len(w) > 1 or w.isdigit()}
+
+
+def repair_binding_variables(proposed, brief):
+    """Map bindings that name a column or concept instead of a plan key.
+
+    The design LLM sometimes writes the column label ("Lương giờ (USD)") in
+    ``variable`` instead of the plan key ("hourly_wage"). Exact key, concept
+    and column matches are repaired first; otherwise the need whose concept
+    shares the most words with the column (and the same unit) is used, but
+    only when that choice is unique, so an unclear binding stays invalid.
+    """
+    needs = list(brief.data_needs)
+    keys = {need.key for need in needs}
+    value = proposed.model_dump()
+    taken = {b["variable"] for s in value["sources"] for b in s["bindings"] if b["variable"] in keys}
+    changed = []
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            if binding["variable"] in keys:
+                continue
+            label = binding["variable"].casefold().strip()
+            match = [n.key for n in needs if label in (n.key.casefold(), n.concept.casefold().strip())]
+            if len(match) != 1:
+                words = _words(binding["variable"]) | _words(binding["column"])
+                scored = []
+                for need in needs:
+                    score = len(words & _words(need.concept))
+                    if score and _words(need.unit) and _words(need.unit) <= (_words(binding.get("target_unit")) | words):
+                        score += 1
+                    scored.append((score, need.key))
+                scored.sort(reverse=True)
+                best = [key for score, key in scored if scored and score == scored[0][0] and score > 0]
+                # If the closest concept is already bound, this binding duplicates it:
+                # never fall back to the next-closest (e.g. GDP → CO2 per capita).
+                match = best if len(best) == 1 and best[0] not in taken else []
+            if len(match) == 1 and match[0] not in taken:
+                changed.append(f"{binding['column']} → {match[0]}")
+                binding["variable"] = match[0]
+                taken.add(match[0])
+    if not changed:
+        return proposed
+    rename = {}
+    for selection in value["sources"]:
+        for binding in selection["bindings"]:
+            rename[binding["column"]] = binding["variable"]
+    for old, new in [item.split(" → ") for item in changed]:
+        rename[old] = new
+    role = {need.key: need.role for need in needs}
+    value["predictors"] = list(dict.fromkeys(
+        rename.get(p, p) for p in value.get("predictors", []) if rename.get(p, p) in keys)) or list(dict.fromkeys(
+        b["variable"] for s in value["sources"] for b in s["bindings"]
+        if role.get(b["variable"]) not in (None, "outcome", "join_key")))
+    if value.get("target") not in keys:
+        value["target"] = rename.get(value.get("target"), value.get("target"))
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Ánh xạ cột sang biến kế hoạch được chuẩn hóa: " + "; ".join(changed) + "."]
+    return AnalysisDesign.model_validate(value)
+
+
+def drop_row_identifier_filters(proposed, collection):
+    """Remove sample filters on row-number/ID columns (every value unique).
+
+    Filtering "rownames between 1 and 534" looks harmless but silently drops
+    rows whose index is outside the range, so the paper reports 533 rows while
+    claiming the whole file was kept. Geography/time filters never need an ID.
+    """
+    profiles = {s["source_key"]: s for s in collection.get("sources", [])}
+    value = proposed.model_dump()
+    dropped = []
+    for selection in value["sources"]:
+        source = profiles.get(selection["source_key"]) or {}
+        rows = source.get("rows")
+        unique = {c["name"]: c.get("unique") for c in source.get("columns", [])}
+        keep = []
+        for rule in selection.get("filters", []):
+            if rows and unique.get(rule["column"]) == rows:
+                dropped.append(f"{selection['source_key']}:{rule['column']}")
+            else:
+                keep.append(rule)
+        selection["filters"] = keep
+    if not dropped:
+        return proposed
+    value["assumptions"] = list(value.get("assumptions", [])) + [
+        "Không lọc mẫu theo cột số thứ tự/định danh dòng (" + ", ".join(dropped) + "); giữ mọi dòng của nguồn."]
+    return AnalysisDesign.model_validate(value)
 
 
 async def design(run):
@@ -154,21 +360,26 @@ async def design(run):
             "dùng strip/casefold khi làm khóa ghép, không coi là đại lượng. Nếu dữ liệu giả lập, "
             "instruction tuning hoặc ảnh không có biến định lượng phù hợp thì adequate=false. "
             "Đọc ý nghĩa và giá trị mẫu để phân biệt mã số với đại lượng. "
-            "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs. "
+            "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs: trường variable PHẢI là "
+            "đúng một key trong data_needs (ví dụ hourly_wage), không phải tên cột hay tên khái niệm; target và predictors cũng dùng key. "
             "Nếu nguồn chứa nhiều địa bàn hoặc thời kỳ, khai báo filters trước ánh xạ bằng cột gốc, "
             "operator eq/in/between và values chính xác có trong nguồn, kèm rationale. Không đoán mã quốc gia. "
             "Không có cách lọc đúng địa bàn/thời kỳ thì adequate=false. "
             "Khai báo source_unit và target_unit trùng đơn vị trong kế hoạch; mọi đổi đơn vị phải có lý do, scale/offset rõ. "
             "Chỉ dùng transform identity/numeric/year/strip/casefold. year chỉ cho cột ngày tháng, "
-            "cột năm dạng số dùng numeric. Không ghép theo số thứ tự dòng. "
+            "cột năm dạng số dùng numeric. Không ghép và không lọc mẫu theo số thứ tự dòng hay cột định danh (rownames, id, stt). "
             "joins ghép lần lượt vào nguồn đầu tiên bằng các key chung. Chỉ one_to_one hoặc many_to_one, "
             "không ghép nhiều-nhiều, không lặp biến ngoài khóa ghép. "
             "method chỉ descriptive/correlation/ols; nếu câu hỏi bắt buộc mô hình panel, time-series, spatial "
             "hoặc thiết kế nhân quả mà OLS không phù hợp, chọn unsupported và ghi missing_requirements. "
+            "predictors chỉ gồm biến đã ánh xạ tới cột SỐ; biến dạng chữ (giới tính, ngành, nghề…) ghi vào limitations, không đưa vào predictors. "
+            "Nếu chỉ dùng một nguồn thì không cần joins và không cần ánh xạ khóa ghép. "
             "Không coi các giả định là đã kiểm chứng. causal_claims_allowed=false.\n"
             + json.dumps(brief.model_dump(), ensure_ascii=False) + "\n"
             + "Phản hồi người dùng: " + run["artifacts"].get("feedback", "") + "\n"
             + data.design_context(collection), AnalysisDesign)
+    proposed = align_units(repair_binding_variables(proposed, brief), brief)
+    proposed = drop_row_identifier_filters(proposed, collection)
     known = {s["source_key"]: s for s in collection["sources"]}
     columns = {key: {c["name"] for c in source.get("columns", [])} for key, source in known.items()}
     coverage = {need.key: {"key": need.key, "concept": need.concept, "role": need.role,
@@ -191,7 +402,9 @@ async def design(run):
             else:
                 coverage[binding.variable]["sources"].append({"source_key": selection.source_key,
                                                                "column": binding.column})
-    uncovered = [row for row in coverage.values() if row["required"] and not row["sources"]]
+    single_source = len({selection.source_key for selection in proposed.sources}) <= 1
+    uncovered = [row for row in coverage.values() if row["required"] and not row["sources"]
+                 and not (single_source and row["role"] == "join_key")]
     validation = {"ok": False, "errors": []}
     if uncovered:
         validation["errors"].append("Snapshot chưa phủ đủ biến bắt buộc ở đúng độ phân giải.")
@@ -201,7 +414,19 @@ async def design(run):
         try:
             _, validation = await asyncio.to_thread(data.prepare_data, run["id"],
                 run["artifacts"]["research_plan"], candidate, collection,
-                run["artifacts"]["settings"]["max_rows"])
+                run["artifacts"]["settings"]["max_rows"], True)
+            if validation.get("dropped_predictors"):
+                # Freeze the reduced model into the design the user approves, then
+                # re-validate it strictly so analysis runs exactly what was approved.
+                candidate["predictors"] = validation["predictors"]
+                candidate["limitations"] = list(candidate.get("limitations", [])) + [
+                    "Không đưa vào mô hình: " + item["reason"] + " Biến này chỉ được bàn luận như hạn chế."
+                    for item in validation["dropped_predictors"]]
+                dropped = validation["dropped_predictors"]
+                _, validation = await asyncio.to_thread(data.prepare_data, run["id"],
+                    run["artifacts"]["research_plan"], candidate, collection,
+                    run["artifacts"]["settings"]["max_rows"])
+                validation["dropped_predictors"] = dropped
         except (ValueError, KeyError, TypeError) as exc:
             validation = {"ok": False, "errors": [str(exc)]}
     feasible = bool(validation.get("ok") and proposed.adequate and proposed.method != "unsupported")
@@ -236,7 +461,15 @@ async def design(run):
             await create_proposal_draft(run, result["missing_requirements"], list(coverage.values()))
         except Exception as exc:
             run["artifacts"]["proposal_draft_error"] = type(exc).__name__
+        if collection.get("sources"):
+            try:
+                run["artifacts"]["alternative_questions"] = await suggest_alternatives(
+                    run, brief, collection, result["missing_requirements"])
+            except Exception as exc:
+                run["artifacts"]["alternative_questions"] = {"alternatives": [], "rejected": [],
+                                                            "error": type(exc).__name__}
     else:
+        run["artifacts"].pop("alternative_questions", None)
         validation["coverage"] = list(coverage.values())
         result = candidate
     run["artifacts"]["design_validation"] = validation
@@ -429,11 +662,22 @@ async def manuscript(run):
                     "analysis_evidence": map_analysis, "approved_source_keys": sorted(allowed_sources)},
                    ensure_ascii=False, default=str), ClaimEvidenceMap)
     claims = dumped(claim_map)
+    from app.routers.discussion import _find_unverified_numbers
+    analysis_json = json.dumps(a["analysis"], ensure_ascii=False, default=str)
+
+    def analysis_numbers_match(text):
+        return not _find_unverified_numbers([text], analysis_json)
+
     for claim in claims["claims"]:
         bad_ids = set(claim.get("evidence_paper_ids", [])) - allowed_papers
         bad_keys = set(claim.get("source_keys", [])) - allowed_sources
         claim["evidence_paper_ids"] = sorted(set(claim.get("evidence_paper_ids", [])) & allowed_papers)
         claim["source_keys"] = sorted(set(claim.get("source_keys", [])) & allowed_sources)
+        if (claim["status"] == "supported_data" and not claim["source_keys"] and allowed_sources
+                and not bad_keys and analysis_numbers_match(claim.get("claim", ""))):
+            # The writer often omits the key for a figure taken from the analysis
+            # itself; the figure matching the analysis is the verified evidence.
+            claim["source_keys"] = sorted(allowed_sources)
         if bad_ids or bad_keys or (claim["status"] == "supported_literature" and not claim["evidence_paper_ids"]) or (
                 claim["status"] == "supported_data" and not claim["source_keys"]):
             claim["status"] = "unsupported"

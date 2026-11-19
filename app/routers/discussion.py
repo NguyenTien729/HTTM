@@ -124,6 +124,47 @@ def _numbers_in(text: str) -> list[str]:
     return _NUMBER_RE.findall(text)
 
 
+# A trailing "," or "." is punctuation unless another digit follows it.
+_VN_THOUSANDS_RE = re.compile(r"(?<![\d.,])\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\d|[.,]\d)")
+_DECIMAL_COMMA_RE = re.compile(r"(?<![\d.,])(\d+),(\d+)(?!\d|[.,]\d)")
+
+
+_CONFIDENCE_LEVEL_RE = re.compile(
+    r"(?:(?:tin\s+cậy|confidence(?:\s+(?:interval|level))?|CI)\s*(?:\(\s*)?(?:ở\s+mức\s+)?(?:90|95|99)(?:\.\d+)?\s*%)"
+    r"|(?:(?:90|95|99)(?:\.\d+)?\s*%\s*(?:CI|confidence|khoảng\s+tin\s+cậy))",
+    re.IGNORECASE)
+
+
+# Significance thresholds ("p < 0,001", "α = 0.05", "mức ý nghĩa 5%") are reporting
+# conventions, not results, so they are never looked up in the analysis.
+_SIGNIFICANCE_THRESHOLD_RE = re.compile(
+    r"(?:\bp(?:[-\s]?value)?\s*(?:<|≤|<=|>|≥|>=)\s*0?\.(?:1|05|01|001|0001)(?!\d))"
+    r"|(?:(?:α|alpha|mức\s+ý\s+nghĩa(?:\s+thống\s+kê)?)\s*(?:=|là|bằng)?\s*(?:0?\.(?:1|05|01|001)(?!\d)|(?:10|5|1)\s*%))",
+    re.IGNORECASE)
+
+
+def _english_thousands(text: str) -> str:
+    """Read evidence figures as numbers: "$10,000" and "$10 000" → 10000, "0,47" → 0.47.
+
+    Paper findings are stored in English or Vietnamese notation; without this
+    a figure such as "0,47" is read as "0" and "47" and the quoting sentence
+    is reported as unverified although the cited paper reports it.
+    """
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+    text = re.sub(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))", "", text)
+    return _normalize_written_numbers(text)
+
+
+def _normalize_written_numbers(text: str) -> str:
+    """Vietnamese prose writes 0,3819 and 1.671,77; read them as 0.3819 and 1671.77.
+
+    Without this, "r=0,3819" was split into "0" and "3819" and reported as an
+    unverified number although it matches the analysis exactly.
+    """
+    text = _VN_THOUSANDS_RE.sub(lambda m: m.group(0).replace(".", "").replace(",", "."), text)
+    return _DECIMAL_COMMA_RE.sub(r"\1.\2", text)
+
+
 def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]:
     """Trả về các số xuất hiện trong text viết ra nhưng không có trong dữ liệu nguồn.
 
@@ -133,7 +174,10 @@ def _find_unverified_numbers(sections: list[str], source_text: str) -> list[str]
     source_values = [float(n) for n in _numbers_in(source_text)]
     flagged: list[str] = []
     for text in sections:
-        cleaned = _CITATION_RE.sub(" ", text)
+        cleaned = _normalize_written_numbers(_CITATION_RE.sub(" ", text))
+        # Confidence levels ("khoảng tin cậy 95%", "95% CI") are method constants, not results.
+        cleaned = _CONFIDENCE_LEVEL_RE.sub(" ", cleaned)
+        cleaned = _SIGNIFICANCE_THRESHOLD_RE.sub(" ", cleaned)
         for token in _numbers_in(cleaned):
             has_decimal = "." in token
             value = float(token)
@@ -288,7 +332,13 @@ async def write_discussion(
     ]
     citations_used, citations_invalid = _verify_citations(sections, valid_paper_ids)
     # Nguồn số liệu hợp lệ = kết quả phân tích + điểm RQ (không có số nào khác được phép).
-    numbers_unverified = _find_unverified_numbers(sections, analysis_json)
+    numbers_unverified = _find_unverified_numbers(
+        [text for text in sections if text is not discussion.literature_comparison_paragraph], analysis_json)
+    # The literature comparison may quote figures reported by the cited papers;
+    # those are checked against the evidence the writer was given.
+    literature_source = analysis_json + " " + _english_thousands(json.dumps(themes, ensure_ascii=False, default=str))
+    numbers_unverified += [n for n in _find_unverified_numbers([discussion.literature_comparison_paragraph], literature_source)
+                           if n not in numbers_unverified]
 
     if citations_invalid:
         logger.warning("Discussion RQ #%d có citation không tồn tại: %s", research_question_id, citations_invalid)

@@ -15,7 +15,7 @@ from app.services.paper_merge import merge_papers
 from app.services.crossref_client import search_crossref
 from app.services.query_builder import build_queries_from_plan
 from app.services.recency_region import matches_region, region_terms
-from app.services.relevance_filter import extract_topic_concepts, screen_papers
+from app.services.relevance_filter import extract_topic_concepts, prescreen_rank, screen_papers
 from app.services.semantic_scholar_client import search_semantic_scholar
 
 logger = logging.getLogger(__name__)
@@ -177,6 +177,10 @@ async def run_search(project_id: int) -> SearchResponse:
                 candidates_seen[key] = paper
 
         fresh = [paper for key, paper in candidates_seen.items() if key not in decisions]
+        # Screen the most promising candidates first and cap LLM calls per window;
+        # unscreened candidates remain eligible in the next (wider) window.
+        cap = max(30, target * int(os.environ.get("SEARCH_SCREEN_FACTOR", "3")))
+        fresh = prescreen_rank(fresh, plan, concepts)[:cap]
         if fresh:
             try:
                 relevant = await screen_papers(fresh, plan, concepts=concepts)
@@ -186,10 +190,11 @@ async def run_search(project_id: int) -> SearchResponse:
                 logger.exception("Relevance screening failed")
                 raise HTTPException(status_code=502, detail="Lọc độ liên quan thất bại; chưa lưu paper chưa kiểm duyệt.") from exc
             accepted = {_key(paper): (paper, score) for paper, score in relevant}
-            # Cache negative decisions too, avoiding repeated LLM calls as the
-            # time window expands.
-            for key, paper in candidates_seen.items():
-                decisions.setdefault(key, accepted.get(key, (paper, -1)))
+            # Cache decisions for the screened papers only (negatives too), so a
+            # wider window never pays twice for the same candidate.
+            for paper in fresh:
+                key = _key(paper)
+                decisions.setdefault(key, accepted.get(key, (candidates_seen[key], -1)))
 
         ranked = sorted((item for item in decisions.values() if item[1] >= 0), key=lambda item: (
             item[1], item[0].citation_count,

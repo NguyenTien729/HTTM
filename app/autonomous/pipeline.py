@@ -362,6 +362,8 @@ async def design(run):
             "dùng strip/casefold khi làm khóa ghép, không coi là đại lượng. Nếu dữ liệu giả lập, "
             "instruction tuning hoặc ảnh không có biến định lượng phù hợp thì adequate=false. "
             "Đọc ý nghĩa và giá trị mẫu để phân biệt mã số với đại lượng. "
+            "Với biến cấp quốc gia, ưu tiên nguồn World Bank (worldbank:...) vì phủ mọi quốc gia, dạng dài quốc gia × năm có mã ISO3; "
+            "chỉ dùng nguồn chỉ phủ một khu vực khi câu hỏi giới hạn đúng khu vực đó. "
             "Chọn tối đa 3 source_key có thật, ánh xạ bindings từ column sang key data_needs: trường variable PHẢI là "
             "đúng một key trong data_needs (ví dụ hourly_wage), không phải tên cột hay tên khái niệm; target và predictors cũng dùng key. "
             "Nếu nguồn chứa nhiều địa bàn hoặc thời kỳ, khai báo filters trước ánh xạ bằng cột gốc, "

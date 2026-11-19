@@ -365,3 +365,21 @@ async def test_log_transform_gives_log_gdp_and_drops_non_positive_values(api, sn
     raw = data.load_snapshot(1, gdp)
     assert np.isclose(frame["gdp_pc"].max(), np.log(raw["NY.GDP.PCAP.CD"].max()))
     assert frame["gdp_pc"].between(6, 9).all()
+
+
+async def test_world_bank_series_are_downloaded_before_regional_uploads(api, snapshots, monkeypatch):
+    async def regional(context, **kwargs):
+        if "GDP per capita" in context["project_topic"]:
+            return {"datasets": [{"dataset_id": f"owner/asia-gdp{i}", "title": "Asia GDP", "source": "Hugging Face",
+                                  "scope_match": "mentioned_in_metadata"} for i in range(4)]}
+        return {"datasets": []}
+    async def inspect(dataset_id):
+        return {"preview_selection": {"config": "default", "split": "train"}}
+    async def download(dataset_id, config, split, max_rows):
+        return pd.DataFrame({"country": ["VNM"], "value": [1.0]}), {"rows": 1}
+    monkeypatch.setattr(data, "discover_gap_datasets", regional)
+    monkeypatch.setattr(data, "inspect_dataset", inspect)
+    monkeypatch.setattr(data, "download_dataset_dataframe", download)
+    collection = await data.collect(wb_run())
+    gdp_sources = [s["candidate"]["dataset_id"] for s in collection["sources"] if "gdp_pc" in s["candidate"]["requirements"]]
+    assert "worldbank:NY.GDP.PCAP.CD" in gdp_sources

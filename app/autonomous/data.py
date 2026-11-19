@@ -378,8 +378,12 @@ async def collect(run, progress=None):
         return [key for key in required_keys if key not in covered]
 
     def rank(pool):
+        # World Bank series come first: they are long-format country × year tables with
+        # ISO3 codes for every economy, which join reliably; community uploads are often
+        # one-region subsets or wide tables that the design step cannot use.
         ranked_all = sorted((candidate for candidate in pool if candidate.get("dataset_id") not in attempted_ids),
-                            key=lambda c: (c.get("scope_match") != "mentioned_in_metadata",
+                            key=lambda c: (not str(c.get("dataset_id", "")).startswith(worldbank.DATASET_PREFIX),
+                                           c.get("scope_match") != "mentioned_in_metadata",
                            -len(c.get("requirements", [])),
                            -sum(n.key in c.get("requirements", []) for n in needs if n.role == "outcome"),
                            c.get("dataset_id", "")))

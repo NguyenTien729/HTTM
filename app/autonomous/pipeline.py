@@ -131,6 +131,8 @@ async def research_plan(run):
         + "Địa bàn người dùng yêu cầu: " + str(run["artifacts"]["settings"].get("region") or "suy ra từ đề tài") + "\n" +
         "Giữ đúng địa bàn và đối tượng. Đề xuất một câu hỏi và khoảng trống thận trọng dựa trên tài liệu; "
         "không tuyên bố đã chứng minh tính mới hay đã tìm thấy dữ liệu. Giả thuyết là dự kiến, không phải kết quả. "
+        "Trong gap, question và feasibility_notes chỉ nhắc tài liệu bằng [id] trong bằng chứng, không tự ghi tên tác giả hay năm "
+        "(tên tác giả viết sai sẽ lan sang bản thảo); không ghi hệ số hay con số không có trong dữ liệu hoặc tài liệu. "
         "Tách data_needs theo biến kết quả, phơi nhiễm/giải thích, kiểm soát và khóa ghép. "
         "Chọn đúng MỘT outcome chính phù hợp nhất với câu hỏi vì bộ phân tích chỉ hỗ trợ một biến đích; không tạo hai outcome thay thế cùng bắt buộc. "
         "Nếu người dùng nêu nhiều outcome thay thế, chọn một outcome chính và ghi lựa chọn còn lại trong feasibility_notes. "

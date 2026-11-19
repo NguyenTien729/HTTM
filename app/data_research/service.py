@@ -1265,6 +1265,8 @@ def _regression_summary(frame: pd.DataFrame, target: str, predictors: list[str])
         "target": target,
         "predictors": numeric_predictors,
         "n": int(n),
+        "df_residual": int(df_resid),
+        "df_model": int(k),
         "r_squared": _safe_float(r_squared),
         "adjusted_r_squared": _safe_float(adjusted_r_squared),
         "f_statistic": _safe_float(f_stat),

@@ -146,9 +146,20 @@ def need_phrases(need, refinement=()):
     return list(dict.fromkeys(p.strip() for p in [*need.search_terms, need.concept, *refinement] if p and p.strip()))
 
 
+_SUBNATIONAL = ("cá nhân", "ca nhan", "individual", "person", "respondent", "student", "sinh viên", "người",
+                "hộ", "household", "firm", "doanh nghiệp", "company", "tỉnh", "province", "district", "huyện",
+                "xã", "commune", "city", "thành phố", "county", "state-level", "trạm", "station", "school", "trường")
+
+
+def worldbank_resolution(resolution):
+    """World Bank WDI is country × year only: skip variables measured below country level."""
+    text = str(resolution or "").casefold()
+    return not any(marker in text for marker in _SUBNATIONAL)
+
+
 async def worldbank_candidates(need, brief, refinement, errors, excluded_ids=()):
     """World Bank indicators for one variable; failures are logged, never fatal."""
-    if need.role == "join_key":
+    if need.role == "join_key" or not worldbank_resolution(need.resolution):
         return []
     try:
         found = await asyncio.wait_for(worldbank.search_indicators(

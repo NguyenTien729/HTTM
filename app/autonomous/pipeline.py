@@ -142,7 +142,13 @@ async def research_plan(run):
         "Chỉ nâng control thành bắt buộc nếu câu hỏi người dùng nói rõ cần kiểm soát biến đó. "
         "geography_terms chỉ gồm các cách gọi tương đương của địa bàn, không đưa khu vực khác hoặc ngôn ngữ thay địa bàn. "
         "evidence_paper_ids chỉ lấy ID trong bằng chứng bên dưới. Nếu cần dữ liệu bảng/chuỗi thời gian, nêu rõ "
-        "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả.\n"
+        "trong feasibility_notes; hiện phương pháp tự động chỉ có mô tả, tương quan và OLS liên hệ, không nhận diện nhân quả. "
+        "GIỚI HẠN PHÂN TÍCH: chỉ có thống kê mô tả, tương quan Pearson và OLS tuyến tính trên biến SỐ; không có số hạng bình phương, "
+        "biến tương tác, so sánh hay kiểm định khác biệt giữa các nhóm, mô hình bảng hay chuỗi thời gian. Vì vậy mỗi giả thuyết phải kiểm định "
+        "được bằng dấu/độ lớn của một hệ số OLS hoặc một tương quan giữa biến số: không đặt giả thuyết phi tuyến, giảm dần, tương tác, "
+        "điều tiết hay khác biệt giữa nam/nữ, vùng, nhóm. Biến dạng phân loại chữ (giới tính, vùng, nghề) chỉ đưa vào data_needs khi "
+        "nguồn có sẵn dạng số 0/1; nếu không thì nêu trong feasibility_notes. Chỉ thêm join_key khi dự kiến phải ghép từ hai nguồn trở lên; "
+        "dữ liệu một bảng cấp cá nhân không cần join_key.\n"
         + "Yêu cầu bổ sung của người dùng: " + run["artifacts"].get("feedback", "") + "\n"
         + data_rule
         + json.dumps(corpus, ensure_ascii=False, default=str), ResearchBrief)

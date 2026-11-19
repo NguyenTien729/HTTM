@@ -269,3 +269,26 @@ def test_choosing_an_alternative_keeps_downloaded_sources_only_when_asked():
     assert "design" not in kept["artifacts"]
     dropped = decide(value, Decision(expected_version=5, action="revise", notes="Đổi câu hỏi", restart_from="research_plan"))
     assert "data_collection" not in dropped["artifacts"]
+
+
+@pytest.mark.parametrize("resolution,searched", [
+    ("country-year", True), ("quốc gia × năm", True), ("national, annual", True),
+    ("cấp cá nhân, năm 1985", False), ("individual", False), ("tỉnh × năm", False), ("household", False)])
+def test_world_bank_is_only_searched_for_country_level_variables(resolution, searched):
+    assert data.worldbank_resolution(resolution) is searched
+
+
+async def test_research_plan_prompt_states_the_analysis_limits(snapshots, monkeypatch):
+    prompts = []
+    async def corpus(project_id):
+        return [{"id": 1, "title": "Paper"}]
+    async def plan(prompt, schema):
+        prompts.append(prompt)
+        return ResearchBrief(**country_brief())
+    async def probe(brief, user_sources, seconds):
+        return {"verdict": "likely", "needs": []}
+    monkeypatch.setattr(pipeline, "evidence", corpus)
+    monkeypatch.setattr(pipeline, "generate_structured", plan)
+    monkeypatch.setattr(data, "probe_feasibility", probe)
+    await pipeline.research_plan(wb_run())
+    assert "không đặt giả thuyết phi tuyến" in prompts[0] and "không cần join_key" in prompts[0]
